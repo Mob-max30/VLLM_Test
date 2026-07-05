@@ -595,16 +595,31 @@ class TransferTopology:
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
     def get_transfer_cache_regions(
-        self, cache: torch.Tensor, layer_spec: "KVCacheSpec"
-    ) -> list[torch.Tensor] | torch.Tensor:
+        self,
+        cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+        layer_spec: "KVCacheSpec",
+    ) -> list[torch.Tensor]:
         """Return the cache tensor(s) to register as NIXL memory regions,
         also accounting for hybrid SSM models specificities.
+
+        Some backends hand over multiple views per layer (e.g. Ascend's
+        compressed MLA stores K and scale as a list of ``as_strided`` views
+        over the same storage, with different dtypes so they cannot be a
+        single tensor). Such a list/tuple is returned as-is so that every
+        view is registered; callers that deduplicate by storage (Mooncake) or
+        by base address (NIXL) collapse overlapping views into one region.
         """
         if isinstance(layer_spec, MambaSpec):
             # Register the whole kv cache shared tensor, including
             # SSM/Conv.
             conv, ssm = cache
             return [conv]
+
+        # Backends that expose multiple views per layer. Return each view so
+        # the caller registers them individually; storage-aware deduplication
+        # downstream collapses views sharing the same backing memory.
+        if isinstance(cache, (list, tuple)):
+            return list(cache)
 
         # Check may be hacky but it's matching
         # `_update_hybrid_attention_mamba_layout`.
@@ -617,7 +632,7 @@ class TransferTopology:
             cache = cache.transpose(0, 1)
 
         # Regular case: backends like FA register K/V in separate regions
-        return cache if self.split_k_and_v else [cache]
+        return list(cache) if self.split_k_and_v else [cache]
 
     def describe(self, remote_engine_id: EngineId, remote_pp_rank: int = 0) -> str:
         """One-line summary of transfer config for logging."""
