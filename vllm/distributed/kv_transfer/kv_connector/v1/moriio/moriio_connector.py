@@ -38,6 +38,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     WriteTask,
     get_moriio_mode,
     get_moriio_node_hosts,
+    get_moriio_request_id_trusted_hosts,
     get_moriio_trusted_remote_hosts,
     get_peer_zmq_from_request_id,
     get_port_offset,
@@ -398,6 +399,9 @@ class MoRIIOConnectorScheduler:
         self.trusted_remote_hosts = get_moriio_trusted_remote_hosts(
             self.kv_transfer_config, self.node_hosts
         )
+        self._request_id_trusted_hosts = get_moriio_request_id_trusted_hosts(
+            self.kv_transfer_config, self.node_hosts
+        )
         self.handshake_port = self.kv_transfer_config.kv_connector_extra_config[
             "handshake_port"
         ]
@@ -565,6 +569,11 @@ class MoRIIOConnectorScheduler:
                 )
                 return
 
+        validate_moriio_remote_host(
+            remote_host,
+            self._request_id_trusted_hosts,
+            "request_id-derived remote_host",
+        )
         remote_notify_port = int(remote_notify_port)
         for tp_index in range(self.tp_size):
             target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
@@ -639,6 +648,11 @@ class MoRIIOConnectorScheduler:
                     remote_host, _, remote_notify_port = parse_moriio_zmq_address(
                         peer_zmq
                     )
+                validate_moriio_remote_host(
+                    remote_host,
+                    self._request_id_trusted_hosts,
+                    "request_id-derived remote_host",
+                )
                 remote_notify_port = int(remote_notify_port)
 
                 block_ids = blocks.get_block_ids()[0]
@@ -678,7 +692,9 @@ class MoRIIOConnectorScheduler:
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
-        meta = MoRIIOConnectorMetadata(self.trusted_remote_hosts)
+        meta = MoRIIOConnectorMetadata(
+            self.trusted_remote_hosts, self._request_id_trusted_hosts
+        )
         meta.transfer_id_to_request_id = self.transfer_id_to_request_id
 
         if self.mode == MoRIIOMode.WRITE and get_role() == ROLE.PRODUCER:

@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConstants,
     MoRIIOMode,
     get_moriio_node_hosts,
+    get_moriio_request_id_trusted_hosts,
     get_moriio_trusted_remote_hosts,
     validate_moriio_remote_host,
 )
@@ -157,6 +158,7 @@ def test_scheduler_rejects_untrusted_remote_hosts_before_notify(monkeypatch):
     scheduler.transfer_id_to_request_id = {}
     scheduler.request_id_to_transfer_id = {}
     scheduler.trusted_remote_hosts = frozenset({"prefill-a"})
+    scheduler._request_id_trusted_hosts = frozenset()
     sent = []
     monkeypatch.setattr(
         scheduler,
@@ -453,6 +455,7 @@ def test_scheduler_release_write_rejects_untrusted_remote_host(monkeypatch):
 def test_scheduler_release_write_sends_for_trusted_remote_host(monkeypatch):
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.trusted_remote_hosts = frozenset({"prefill-a"})
+    scheduler._request_id_trusted_hosts = frozenset()
     scheduler.tp_size = 1
     sent = []
     monkeypatch.setattr(
@@ -473,6 +476,7 @@ def test_scheduler_release_write_sends_for_trusted_remote_host(monkeypatch):
 def test_scheduler_release_write_none_host_uses_request_id(monkeypatch):
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.trusted_remote_hosts = frozenset({"prefill-a"})
+    scheduler._request_id_trusted_hosts = frozenset()
     scheduler.tp_size = 1
     sent = []
     monkeypatch.setattr(
@@ -532,3 +536,214 @@ def test_scheduler_update_state_rejects_untrusted_remote_host_singular(monkeypat
         )
 
     assert sent == []
+
+
+def _request_id_with_prefill_host(host):
+    """Router request_id whose embedded *prefill* peer host is ``host``.
+
+    Consumer-side resolution (``is_producer=False``) matches ``_PREFILL_ZMQ_RE``
+    and parses the prefill zmq_address, so ``host`` becomes the
+    request_id-derived ``remote_host`` (notify port 6100).
+    """
+    return (
+        f"___prefill_addr_host:{host},handshake:6301,notify:6100"
+        "___decode_addr_host:decode-a,handshake:6301,notify:6100"
+        "_0123456789abcdef0123456789abcdef"
+    )
+
+
+def test_request_id_trusted_hosts_empty_when_unconfigured():
+    # Opt-in: without an explicit trusted_remote_hosts the allowlist is empty,
+    # which makes the request_id-derived validate a no-op (default flow intact).
+    config = KVTransferConfig(kv_connector_extra_config={})
+    assert get_moriio_request_id_trusted_hosts(config, ["local-1"]) == frozenset()
+
+
+def test_request_id_trusted_hosts_union_node_hosts_when_configured():
+    # Configured: explicit peers UNION this instance's own node_hosts (the local
+    # host is trivially safe to accept from a request_id).
+    config = KVTransferConfig(
+        kv_connector_extra_config={"trusted_remote_hosts": "prefill-a"}
+    )
+    assert get_moriio_request_id_trusted_hosts(config, ["local-1"]) == frozenset(
+        {"prefill-a", "local-1"}
+    )
+
+
+def test_add_new_req_rejects_untrusted_request_id_host():
+    # No direct remote_host -> host is resolved from the client-controllable
+    # request_id; with a configured allowlist an untrusted host must be rejected.
+    metadata = MoRIIOConnectorMetadata(request_id_trusted_hosts={"prefill-a"})
+
+    with pytest.raises(ValueError, match="untrusted host"):
+        metadata.add_new_req(
+            request_id=_request_id_with_prefill_host("evil.example"),
+            local_block_ids=[1],
+            kv_transfer_params={"transfer_id": "tx-1"},
+        )
+
+    assert metadata.reqs_to_recv == {}
+
+
+def test_add_new_req_accepts_trusted_request_id_host():
+    metadata = MoRIIOConnectorMetadata(request_id_trusted_hosts={"prefill-a"})
+    request_id = _request_id_with_prefill_host("prefill-a")
+
+    metadata.add_new_req(
+        request_id=request_id,
+        local_block_ids=[1],
+        kv_transfer_params={"transfer_id": "tx-1", "remote_block_ids": [2]},
+    )
+
+    # A request_id host inside the allowlist survives and is registered.
+    assert metadata.reqs_to_recv[request_id].remote_host == "prefill-a"
+
+
+def test_add_new_req_skips_request_id_validation_when_unconfigured():
+    # No-regression: unconfigured allowlist (empty) -> the request_id-derived
+    # host is NOT validated, so an arbitrary embedded host flows through exactly
+    # as it did before the opt-in guard existed.
+    metadata = MoRIIOConnectorMetadata()
+    request_id = _request_id_with_prefill_host("evil.example")
+
+    metadata.add_new_req(
+        request_id=request_id,
+        local_block_ids=[1],
+        kv_transfer_params={"transfer_id": "tx-1"},
+    )
+
+    assert metadata.reqs_to_recv[request_id].remote_host == "evil.example"
+
+
+def test_scheduler_release_rejects_untrusted_request_id_host(monkeypatch):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.trusted_remote_hosts = frozenset({"prefill-a"})
+    scheduler._request_id_trusted_hosts = frozenset({"prefill-a"})
+    scheduler.tp_size = 1
+    sent = []
+    monkeypatch.setattr(
+        scheduler,
+        "_send_transfer_release",
+        lambda *args, **kwargs: sent.append((args, kwargs)),
+    )
+
+    # remote_host omitted -> host recovered from the request_id; an untrusted
+    # host must fail closed before any release dial leaves the box.
+    with pytest.raises(ValueError, match="untrusted host"):
+        scheduler._release_write_prefill_blocks(
+            _request_id_with_prefill_host("evil.example"),
+            {"transfer_id": "tx"},
+        )
+
+    assert sent == []
+
+
+def test_scheduler_release_accepts_trusted_request_id_host(monkeypatch):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.trusted_remote_hosts = frozenset({"prefill-a"})
+    scheduler._request_id_trusted_hosts = frozenset({"prefill-a"})
+    scheduler.tp_size = 1
+    sent = []
+    monkeypatch.setattr(
+        scheduler,
+        "_send_transfer_release",
+        lambda transfer_id, host, port: sent.append((transfer_id, host, port)),
+    )
+
+    scheduler._release_write_prefill_blocks(
+        _request_id_with_prefill_host("prefill-a"),
+        {"transfer_id": "tx"},
+    )
+
+    # A request_id host inside the allowlist reaches the release dial.
+    assert sent == [("tx", "prefill-a", 6100)]
+
+
+def test_scheduler_release_skips_request_id_validation_when_unconfigured(monkeypatch):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    # Effective direct-host trust list is populated (its unconfigured default is
+    # node_hosts), but the request_id allowlist is empty. The request_id host
+    # must be checked against the EMPTY allowlist, not the effective one -- else
+    # the opt-in default flow would false-reject legitimate peers.
+    scheduler.trusted_remote_hosts = frozenset({"prefill-a"})
+    scheduler._request_id_trusted_hosts = frozenset()
+    scheduler.tp_size = 1
+    sent = []
+    monkeypatch.setattr(
+        scheduler,
+        "_send_transfer_release",
+        lambda transfer_id, host, port: sent.append((transfer_id, host, port)),
+    )
+
+    scheduler._release_write_prefill_blocks(
+        _request_id_with_prefill_host("evil.example"),
+        {"transfer_id": "tx"},
+    )
+
+    # Unconfigured request_id trust -> arbitrary embedded host flows through.
+    assert sent == [("tx", "evil.example", 6100)]
+
+
+def test_scheduler_update_state_rejects_untrusted_request_id_host(monkeypatch):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.tp_size = 2
+    scheduler.dp_rank = 0
+    scheduler.transfer_id_to_request_id = {}
+    scheduler.request_id_to_transfer_id = {}
+    scheduler.trusted_remote_hosts = frozenset({"prefill-a"})
+    scheduler._request_id_trusted_hosts = frozenset({"prefill-a"})
+    sent = []
+    monkeypatch.setattr(
+        scheduler,
+        "send_notify_block",
+        lambda **kwargs: sent.append(kwargs),
+    )
+    request = SimpleNamespace(
+        request_id=_request_id_with_prefill_host("evil.example"),
+        kv_transfer_params={"transfer_id": "tx-1", "do_remote_prefill": True},
+    )
+
+    # remote_host omitted -> resolved from request_id; the untrusted host must be
+    # rejected before any notify reaches the peer.
+    with pytest.raises(ValueError, match="untrusted host"):
+        scheduler.update_state_after_alloc(
+            request,
+            SimpleNamespace(get_block_ids=lambda: ([1, 2],)),
+            0,
+        )
+
+    assert sent == []
+
+
+def test_scheduler_update_state_skips_request_id_validation_when_unconfigured(
+    monkeypatch,
+):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.tp_size = 1
+    scheduler.dp_rank = 0
+    scheduler.transfer_id_to_request_id = {}
+    scheduler.request_id_to_transfer_id = {}
+    scheduler.trusted_remote_hosts = frozenset({"prefill-a"})
+    scheduler._request_id_trusted_hosts = frozenset()
+    sent = []
+    monkeypatch.setattr(
+        scheduler,
+        "send_notify_block",
+        lambda **kwargs: sent.append(kwargs),
+    )
+    request = SimpleNamespace(
+        request_id=_request_id_with_prefill_host("evil.example"),
+        kv_transfer_params={"transfer_id": "tx-1", "do_remote_prefill": True},
+    )
+
+    # No-regression: unconfigured request_id trust -> arbitrary embedded host is
+    # accepted and the notify path proceeds to the resolved peer.
+    scheduler.update_state_after_alloc(
+        request,
+        SimpleNamespace(get_block_ids=lambda: ([1, 2],)),
+        0,
+    )
+
+    assert [kw["host"] for kw in sent] == ["evil.example"]

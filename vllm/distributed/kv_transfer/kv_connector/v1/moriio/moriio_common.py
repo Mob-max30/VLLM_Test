@@ -279,6 +279,27 @@ def validate_moriio_remote_host(
         raise ValueError(f"{config_key} contains untrusted host: {value!r}")
 
 
+def get_moriio_request_id_trusted_hosts(
+    kv_transfer_config: KVTransferConfig,
+    node_hosts: Collection[str],
+) -> frozenset[str]:
+    """Allowlist for peer hosts parsed from the request_id.
+
+    The request_id can carry a client-supplied ``X-Request-Id``, so a host
+    parsed from it is only trusted when the operator explicitly set
+    ``trusted_remote_hosts``. Returns an empty set when unconfigured (the
+    default flow is left unvalidated); otherwise the configured peers plus this
+    instance's own ``node_hosts`` (the local host is trivially safe).
+    """
+    explicit = _normalize_node_hosts(
+        kv_transfer_config.kv_connector_extra_config.get("trusted_remote_hosts"),
+        "kv_connector_extra_config['trusted_remote_hosts']",
+    )
+    if not explicit:
+        return frozenset()
+    return frozenset(explicit) | frozenset(node_hosts)
+
+
 _DEPRECATED_ENV_VARS: dict[str, str] = {
     "VLLM_MORIIO_CONNECTOR_READ_MODE": "read_mode",
     "VLLM_MORIIO_QP_PER_TRANSFER": "qp_per_transfer",
@@ -514,12 +535,14 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def __init__(
         self,
         trusted_remote_hosts: Collection[str] = (),
+        request_id_trusted_hosts: Collection[str] = (),
     ):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.trusted_remote_hosts = frozenset(trusted_remote_hosts)
+        self._request_id_trusted_hosts = frozenset(request_id_trusted_hosts)
 
     def __repr__(self):
         return (
@@ -580,6 +603,16 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
                 remote_host = remote_hosts[0]
                 remote_handshake_port = int(MoRIIOConstants.DEFAULT_HANDSHAKE_PORT)
                 remote_notify_port = int(MoRIIOConstants.DEFAULT_NOTIFY_PORT)
+
+        # request_id-derived peer host: the request_id can carry a client
+        # X-Request-Id, so validate it against the operator's allowlist when
+        # configured (empty set = unconfigured = no-op, keeping the default
+        # flow unchanged). Direct/plural hosts were already checked above.
+        validate_moriio_remote_host(
+            remote_host,
+            self._request_id_trusted_hosts,
+            "request_id-derived remote_host",
+        )
 
         # If remote block metadata is absent, use empty defaults so the request
         # remains a no-op.
