@@ -9,7 +9,7 @@ logic directly for the ECCPUConnector.
 
 import threading
 from math import ceil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
@@ -57,6 +57,80 @@ class ECCPUScheduler:
         # Locally cached mm_hashes pinned for CPU->GPU re-copy this step.
         self._pending_reload: set[str] = set()
 
+        self._ec_config = ec_config
+        self._nixl_enabled: bool = bool(getattr(ec_config, "ec_enable_nixl", False))
+        # NIXL fields default to None/empty so the gate-off path is untouched.
+        self._data: Any = None
+        self._compat_hash: str | None = None
+        self._first_in_batch: bool = True
+        self._transport: Any = None
+        self._producer_session: Any = None
+        self._sessions: dict = {}
+        self._in_flight: set[str] = set()
+        self._tombstones: set[str] = set()
+        self._step_completed: set[str] = set()
+        self._peer_host: str | None = None
+        self._peer_port: int | None = None
+        if self._nixl_enabled:
+            self._setup_nixl(vllm_config)
+
+    def _setup_nixl(self, vllm_config: "VllmConfig") -> None:
+        # Lazy imports keep nixl/zmq off the gate-off path.
+        from vllm import envs
+        from vllm.distributed.ec_transfer.ec_connector.cpu.control.zmq import (
+            ZmqClientTransport,
+            ZmqServerTransport,
+        )
+        from vllm.distributed.ec_transfer.ec_connector.cpu.data.nixl import (
+            NixlDataTransport,
+        )
+        from vllm.distributed.ec_transfer.ec_connector.cpu.protocol import (
+            compute_ec_compatibility_hash,
+        )
+        from vllm.distributed.ec_transfer.ec_connector.cpu.session import (
+            ProducerSession,
+        )
+        from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+        from vllm.version import __version__ as VLLM_VERSION
+
+        if NixlWrapper is None or nixl_agent_config is None:
+            raise RuntimeError(
+                "ec_enable_nixl=True requires NIXL; install the `nixl` package "
+                "or set ec_enable_nixl=False."
+            )
+        engine_id = self._ec_config.engine_id
+        assert engine_id is not None
+        self._data = NixlDataTransport(
+            agent_name=engine_id,
+            base_ptr=self._memory_context.region.base_ptr,
+            num_blocks=self._memory_context.num_blocks,
+            block_size_bytes=self._memory_context.block_size_bytes,
+            total_size_bytes=self._memory_context.region.total_size_bytes,
+        )
+        self._compat_hash = compute_ec_compatibility_hash(
+            vllm_version=VLLM_VERSION,
+            model=str(vllm_config.model_config.model),
+            dtype=str(self._memory_context.dtype),
+            block_size_bytes=self._memory_context.block_size_bytes,
+        )
+        if self._is_producer:
+            self._peer_host = envs.VLLM_EC_SIDE_CHANNEL_HOST
+            self._peer_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
+            self._producer_session = ProducerSession(
+                transport=ZmqServerTransport(
+                    host=self._peer_host, port=self._peer_port
+                ),
+                data=self._data,
+                region=self._memory_context.region,
+                local_encodings=self._local_encodings,
+                blocks=self._blocks,
+                lock=self._shared_lock,
+                compat_hash=self._compat_hash,
+            )
+            self._producer_session.start()
+        if self._is_consumer:
+            self._transport = ZmqClientTransport()
+
     def has_cache_item(self, identifier: str) -> bool:
         if not self._is_consumer:
             return False
@@ -65,7 +139,140 @@ class ECCPUScheduler:
     def ensure_cache_available(
         self, request: "Request", num_computed_tokens: int
     ) -> bool:
-        return True  # CPU Offloading never blocks.
+        if not self._nixl_enabled:
+            return True  # CPU offload never blocks.
+        first = self._first_in_batch
+        self._first_in_batch = False
+        if not self._is_consumer:
+            return True
+        if first:
+            self._poll_step()
+        return self._nixl_consumer_admit(request, num_computed_tokens)
+
+    def _nixl_consumer_admit(
+        self, request: "Request", num_computed_tokens: int
+    ) -> bool:
+        params: dict[str, dict[str, Any]] = (
+            getattr(request, "ec_transfer_params", None) or {}
+        )
+        if not params:
+            return True
+        pending = False
+        for feature in request.mm_features:
+            pos = feature.mm_position
+            if pos.offset + pos.length <= num_computed_tokens:
+                continue
+            mm_hash = feature.identifier
+            with self._shared_lock:
+                is_local = mm_hash in self._local_encodings
+                if is_local:
+                    if mm_hash not in self._pending_reload:
+                        self._memory_context.region.pin(self._blocks[mm_hash])
+                    self._pending_reload.add(mm_hash)
+            if is_local:
+                continue
+            if mm_hash in self._in_flight:
+                pending = True
+                continue
+            if mm_hash in self._step_completed:
+                pending = True
+                continue
+            if mm_hash in self._tombstones:
+                self._tombstones.discard(mm_hash)
+                continue
+            info = params.get(mm_hash)
+            if info is None:
+                continue
+            expected = (
+                pos.length
+                * self._memory_context.hidden_dim
+                * self._memory_context.element_size
+            )
+            if int(info.get("size_bytes", -1)) != expected:
+                logger.warning("EC: size mismatch mm_hash=%s; local encode", mm_hash)
+                continue
+            try:
+                self._start_xfer(mm_hash, info, expected)
+            except Exception:
+                logger.exception("EC: start xfer failed mm_hash=%s", mm_hash)
+                continue
+            self._in_flight.add(mm_hash)
+            pending = True
+        return not pending
+
+    def _poll_step(self) -> None:
+        import time
+
+        now = time.monotonic()
+        all_messages = self._transport.poll()
+        for addr, session in list(self._sessions.items()):
+            session.poll(all_messages.get(addr, []), now)
+        for addr in self._transport.poll_dead():
+            self._on_peer_down(addr)
+        for session in self._sessions.values():
+            self._process_session_results(session)
+
+    def _process_session_results(self, session) -> None:
+        r = session.take_results()
+        for mm_hash in r.completed:
+            self._in_flight.discard(mm_hash)
+            self._step_completed.add(mm_hash)
+        for mm_hash in r.tombstoned:
+            self._in_flight.discard(mm_hash)
+            blocks = self._blocks.pop(mm_hash, None)
+            if blocks:
+                self._memory_context.region.free(blocks)
+            self._tombstones.add(mm_hash)
+        for mm_hash in r.quarantined:
+            self._in_flight.discard(mm_hash)
+            self._tombstones.add(mm_hash)
+        for mm_hash in r.cancelled:
+            self._in_flight.discard(mm_hash)
+            blocks = self._blocks.pop(mm_hash, None)
+            if blocks:
+                self._memory_context.region.free(blocks)
+        for mm_hash, block_indices in r.settled:
+            self._memory_context.region.free(block_indices)
+
+    def _start_xfer(
+        self, mm_hash: str, info: "dict[str, Any]", size_bytes: int
+    ) -> None:
+        import time
+        from math import ceil
+
+        from vllm.distributed.ec_transfer.ec_connector.cpu.session import (
+            ConsumerSession,
+        )
+
+        n_blocks = max(1, ceil(size_bytes / self._memory_context.block_size_bytes))
+        indices = self._fifo_alloc(n_blocks)
+        self._blocks[mm_hash] = indices
+        addr = (info["peer_host"], int(info["peer_port"]))
+        if addr not in self._sessions:
+            zmq_conn = self._transport.connect(addr)
+            assert self._compat_hash is not None
+            self._sessions[addr] = ConsumerSession(
+                addr=addr,
+                zmq_conn=zmq_conn,
+                transport=self._transport,
+                data=self._data,
+                compat_hash=self._compat_hash,
+            )
+        deadline = time.monotonic() + 2.0  # CONSUMER_XFER_ACK_TIMEOUT_S
+        try:
+            self._sessions[addr].start_xfer(mm_hash, indices, deadline)
+        except Exception:
+            self._memory_context.region.free(self._blocks.pop(mm_hash))
+            raise
+
+    def _on_peer_down(self, addr) -> None:
+        session = self._sessions.pop(addr, None)
+        if session is None:
+            return
+        session.on_peer_down()
+        self._process_session_results(session)
+        session.close()
+        logger.info("EC: peer down addr=%s", addr)
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         feature = request.mm_features[index]
@@ -104,6 +311,8 @@ class ECCPUScheduler:
             if self._is_producer:
                 meta.saves.update(self._build_saves())
             if self._is_consumer:
+                if self._nixl_enabled:
+                    self._promote_completed_reads(meta)
                 meta.loads.update(self._build_loads())
         except Exception:
             # Drop this step's reload pins so a failure mid-build does not
@@ -111,15 +320,69 @@ class ECCPUScheduler:
             if self._is_consumer:
                 self._drop_reload_pins()
             raise
+        finally:
+            if self._nixl_enabled:
+                self._first_in_batch = True
         return meta
 
+    def _promote_completed_reads(self, meta: ECCPUConnectorMetadata) -> None:
+        for mm_hash in self._step_completed:
+            if mm_hash in self._blocks:
+                meta.loads[mm_hash] = self._blocks[mm_hash]
+                with self._shared_lock:
+                    self._local_encodings[mm_hash] = None
+        self._step_completed.clear()
+
+    def request_finished(
+        self, request: "Request"
+    ) -> tuple[bool, "dict[str, Any] | None"]:
+        if not (self._nixl_enabled and self._is_producer):
+            return False, None
+        params: dict[str, dict[str, Any]] = {}
+        with self._shared_lock:
+            local_snapshot = set(self._local_encodings)
+        for feature in request.mm_features:
+            mm_hash = feature.identifier
+            if mm_hash not in local_snapshot:
+                continue
+            size_bytes = (
+                feature.mm_position.length
+                * self._memory_context.hidden_dim
+                * self._memory_context.element_size
+            )
+            params[mm_hash] = {
+                "peer_host": self._peer_host,
+                "peer_port": self._peer_port,
+                "size_bytes": size_bytes,
+            }
+        logger.debug(
+            "EC: request_finished req_id=%s params=%s", request.request_id, params
+        )
+        return False, (params or None)
+
     def shutdown(self) -> None:
+        if self._producer_session is not None:
+            self._producer_session.stop()
         if self._is_consumer:
             self._drop_reload_pins()
+        if self._nixl_enabled:
+            self._shutdown_nixl_consumer()
+            if self._data is not None:
+                try:
+                    self._data.deregister()
+                except Exception:
+                    logger.debug("ec: deregister failed", exc_info=True)
         try:
             self._memory_context.region.cleanup()
         except Exception:
             logger.debug("ec: region cleanup failed", exc_info=True)
+
+    def _shutdown_nixl_consumer(self) -> None:
+        for session in list(self._sessions.values()):
+            session.close()
+        self._sessions.clear()
+        if self._transport is not None:
+            self._transport.close()
 
     def _drop_reload_pins(self) -> None:
         """Unpin and forget every block pinned for this step's reloads."""
