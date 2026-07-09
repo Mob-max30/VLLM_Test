@@ -800,7 +800,10 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if (
             speculative_config is None
-            or not speculative_config.uses_dynamic_speculative_decoding()
+            or not (
+                speculative_config.uses_dynamic_speculative_decoding()
+                or speculative_config.uses_dflash_dcut()
+            )
             or not self.compilation_config.cudagraph_mode.has_full_cudagraphs()
             or self.use_v2_model_runner
         ):
@@ -1004,6 +1007,10 @@ class VllmConfig:
             and self.parallel_config.enable_dbo
             and self.parallel_config.all2all_backend == "deepep_high_throughput"
         )
+        dflash_dcut_enabled = (
+            self.speculative_config is not None
+            and self.speculative_config.uses_dflash_dcut()
+        )
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
@@ -1014,6 +1021,10 @@ class VllmConfig:
                     "Async scheduling is not compatible with ROCm DeepEP "
                     "high-throughput DBO. Please use --no-async-scheduling or "
                     "select a different all2all backend."
+                )
+            if dflash_dcut_enabled:
+                raise ValueError(
+                    "Async scheduling is currently not supported with DFlash D-Cut."
                 )
             if self.speculative_config is not None:
                 if (
@@ -1046,6 +1057,12 @@ class VllmConfig:
                 # impacts performance of pooling models, so we disable by default.
                 logger.debug(
                     "Disabling asynchronous scheduling by default for pooling model."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif dflash_dcut_enabled:
+                logger.warning_once(
+                    "Async scheduling is currently not supported with DFlash "
+                    "D-Cut and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             elif (
@@ -2125,6 +2142,9 @@ class VllmConfig:
                 "dspark",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
+
+            if speculative_config.uses_dflash_dcut():
+                unsupported.append("DFlash D-Cut draft pruning")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
             # DFlash and DSpark use parallel drafting natively in V2 via their
