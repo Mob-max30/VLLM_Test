@@ -181,10 +181,10 @@ class FlashAttentionBackend(AttentionBackend):
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             if current_platform.is_xpu():
                 return True
-            return (
-                get_flash_attn_version() == 3
-                and current_platform.is_device_capability_family(90)
-            )
+            return get_flash_attn_version() in (
+                3,
+                4,
+            ) and current_platform.is_device_capability_family(90)
         return kv_cache_dtype in ["auto", "float16", "bfloat16"]
 
     @classmethod
@@ -793,7 +793,7 @@ class FlashAttentionImpl(AttentionImpl):
         # FA4's SM90 fp8-KV path consumes fp16 Q (q_descale=None) and dequants fp8 K/V
         # in-kernel. So for FA4 impls we report False here: the layer then skips
         # creating/applying query_quant, leaving Q in its native (bf16) dtype, which the
-        # flash_attn_interface FA4 branch casts to fp16. 
+        # flash_attn_interface FA4 branch casts to fp16.
         self.supports_quant_query_input = (
             flash_attn_supports_quant_query_input()
             and self.vllm_flash_attn_version != 4
