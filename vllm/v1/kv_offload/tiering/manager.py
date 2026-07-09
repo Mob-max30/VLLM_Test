@@ -46,8 +46,10 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
+    LOOKUP_SCOPE_KEY,
     JobId,
     JobMetadata,
+    LookupScope,
     ParentManager,
     SecondaryTierManager,
 )
@@ -306,6 +308,19 @@ class TieringOffloadingManager(OffloadingManager):
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
+
+        # TODO: decide how to handle unknown lookup_scope values —
+        # currently falls through to "all" silently. Options: log a
+        # warning (but this is per-block hot path), reject the request
+        # upstream, or keep silent for forward-compat with newer clients.
+        # TODO: consider a server-level config for the default
+        # lookup_scope. "primary" default would keep store cascade
+        # (writes to all tiers) but skip promotion on reads unless a
+        # request explicitly opts in with lookup_scope="all".
+        params = req_context.kv_transfer_params
+        scope = params.get(LOOKUP_SCOPE_KEY) if params else None
+        if scope == LookupScope.PRIMARY.value:
+            return LookupResult.MISS
 
         any_retry = False
         for tier in self.secondary_tiers:
