@@ -72,16 +72,17 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             and layer_idx >= config.first_k_dense_replace
             and layer_idx % moe_layer_freq == 0
         ):
+            # Defer the MoE cross-rank all-reduce; it is fused into the next
+            # layer's input_layernorm (or the final norm) via
+            # fused_allreduce_rms_norm.
             self.mlp = DeepseekV2MoE(
                 config=config,
                 parallel_config=parallel_config,
                 quant_config=quant_config,
+                reduce_results=False,
                 prefix=f"{prefix}.mlp",
+                apply_routed_scale_to_output=False,
             )
-            # Defer the MoE cross-rank all-reduce; it is fused into the next
-            # layer's input_layernorm (or the final norm) via
-            # fused_allreduce_rms_norm. self.mlp.experts is the MoERunner.
-            self.mlp.experts.moe_config.skip_final_all_reduce = True
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -336,7 +337,6 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the
         # decoder-layer type (DeepseekV32DecoderLayer is a plain nn.Module).
-        self.expert_weights = []
         self.num_expert_groups = getattr(self.config, "n_group", 1)
         self.moe_layers = []
         self.moe_mlp_layers = []

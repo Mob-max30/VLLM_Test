@@ -8,7 +8,6 @@
 # Documentation
 # label(str): the name of the test. emojis allowed.
 # fast_check(bool): whether to run this on each commit on the fastcheck pipeline.
-# torch_nightly(bool): whether to run this on vllm against the torch nightly pipeline.
 # fast_check_only(bool): run this test on the fastcheck pipeline only
 # optional(bool): never run this test by default (i.e. need to unblock manually) unless it's a scheduled nightly run.
 # soft_fail(bool): allow this step to fail without failing the entire pipeline (useful for flaky or experimental tests).
@@ -39,8 +38,8 @@
 #####################################################################################################################################
 #                                                                                                                                   #
 # IMPORTANT:                                                                                                                        #
-#   * This reduced AMD CI definition targets MI300 agents only. All upcoming feature improvements are tracked in:                  #
-#     https://github.com/vllm-project/vllm/issues/34994                                                                            #
+#   * Currently AMD CI runs test groups on MI300 agents. All upcoming feature improvements are                                 #
+#         tracked in: https://github.com/vllm-project/vllm/issues/34994                                                             #
 #                                                                                                                                   #
 #-----------------------------------------------------------------------------------------------------------------------------------#
 #                                                                                                                                   #
@@ -112,20 +111,12 @@ steps:
 #                                                                                                                                       #
 #########################################################################################################################################
 
-- label: PyTorch Compilation Unit Tests # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_1
-  torch_nightly: true
-  working_dir: "/vllm-workspace/tests"
-  commands:
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+#----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
 - label: PyTorch Fullgraph Smoke Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
@@ -168,7 +159,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   no_gpu: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/test_utils.py models/test_vision.py
@@ -182,6 +172,16 @@ steps:
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/language/pooling_mteb_test
+
+- label: Language Models Test (PPL) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -v -s models/language/generation_ppl_test
+
+#------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
 
 - label: Batch Invariance (H100-MI300) # TBD
   timeout_in_minutes: 180
@@ -211,6 +211,8 @@ steps:
   commands:
   - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
 
+#-------------------------------------------------------------  mi300 · misc  ------------------------------------------------------------#
+
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
@@ -223,6 +225,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
+  - pytest -v -s test_sampling_params.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
@@ -231,6 +234,37 @@ steps:
   - pytest -v -s parser
   - pytest -v -s transformers_utils
   - pytest -v -s config
+
+#------------------------------------------------------------  mi300 · rust  -----------------------------------------------------------#
+
+- label: Rust Frontend Cargo Style + Clippy # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
+
+- label: Rust Frontend Cargo Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
+
+#-----------------------------------------------------------  mi300 · docker  ----------------------------------------------------------#
+
+- label: Docker Build Metadata (ROCm) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  no_gpu: true
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -v -s tools/test_docker_build_metadata_args.py
 
 #########################################################################################################################################
 #                                                                                                                                       #
@@ -245,7 +279,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -262,7 +295,7 @@ steps:
   commands:
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
-  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
   - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
@@ -279,6 +312,14 @@ steps:
   - pytest -v -s benchmarks/
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
+
+- label: PyTorch Compilation Unit Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: Fusion E2E Config Sweep (H100-MI300) # TBD
   timeout_in_minutes: 180
@@ -315,7 +356,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
@@ -489,7 +529,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -502,30 +541,28 @@ steps:
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
+  - pytest -v -s entrypoints/scale_out
 
 - label: Entrypoints Integration (API Server OpenAI - Part 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+  - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
 - label: Entrypoints Integration (API Server OpenAI - Part 2) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -537,7 +574,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -551,7 +587,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -562,7 +597,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -573,7 +607,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -584,7 +617,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -618,6 +650,14 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
+- label: MRCR Eval Small Models # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
+
 - label: LM Eval Small Models (MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
@@ -643,6 +683,14 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
+
+- label: LM Eval Small Models (2xB200-2xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 - label: DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
@@ -671,6 +719,15 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
+- label: Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy (4xH100-4xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
+
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
@@ -689,6 +746,16 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+
+- label: ROCm LM Eval Large Models (8 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_8
+  num_gpus: 8
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
 
 #---------------------------------------------------------  mi300 · examples  ----------------------------------------------------------#
 
@@ -722,6 +789,15 @@ steps:
 
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
+- label: vLLM IR Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/"
+  commands:
+  - pytest -v -s tests/ir
+  - pytest -v -s tests/kernels/ir
+
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
@@ -738,6 +814,14 @@ steps:
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
+
+- label: Kernels KDA Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -v -s kernels/test_kda.py
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
@@ -784,8 +868,6 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   - pytest -v -s -x lora/test_chatglm3_tp.py
   - pytest -v -s -x lora/test_llama_tp.py
   - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
@@ -799,7 +881,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - apt-get update && apt-get install -y curl libsodium23
@@ -807,14 +888,89 @@ steps:
   - pytest -v -s model_executor -m '(not slow_test)'
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
+#----------------------------------------------------  mi300 · model_runner_v2  -------------------------------------------------------#
+
+- label: Model Runner V2 Core Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s v1/engine/test_llm_engine.py -k "not test_engine_metrics"
+  - ENFORCE_EAGER=1 pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram"
+  - pytest -v -s v1/e2e/general/test_context_length.py
+  - pytest -v -s v1/e2e/general/test_min_tokens.py
+  - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
+
+- label: Model Runner V2 Examples # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/examples"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pip install tensorizer
+  - python3 basic/offline_inference/chat.py
+  - python3 basic/offline_inference/generate.py --model facebook/opt-125m
+  - python3 generate/multimodal/audio_language_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
+  - python3 generate/multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
+  - python3 pooling/embed/vision_embedding_offline.py --seed 0
+  - python3 features/automatic_prefix_caching/prefix_caching_offline.py
+  - python3 deployment/llm_engine_example.py
+  - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+  - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+  - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+
+- label: Model Runner V2 Distributed (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/test_basic_correctness.py -m 'distributed(num_gpus=2)' -k "not ray and not True"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py -k "not ray"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+
+- label: Model Runner V2 Pipeline Parallelism (4 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
+  - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
+
+- label: Model Runner V2 Spec Decode # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
+  - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
+  - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
+  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
+
 #------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
 
 - label: Basic Models Tests (Extra Initialization) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
-  parallelism: 2
+  parallelism: 6
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
@@ -823,7 +979,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
@@ -834,7 +989,7 @@ steps:
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
@@ -850,7 +1005,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pip freeze | grep -E 'torch'
@@ -860,7 +1014,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -875,7 +1028,6 @@ steps:
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
   - pytest -v -s models/multimodal/test_mapping.py
 
@@ -885,7 +1037,6 @@ steps:
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 
@@ -895,17 +1046,14 @@ steps:
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
 - label: "Multi-Modal Models (Standard) 1: qwen2" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
 
@@ -913,10 +1061,8 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
 
@@ -924,10 +1070,8 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
@@ -938,7 +1082,6 @@ steps:
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Processor (CPU) %N # TBD
@@ -949,7 +1092,6 @@ steps:
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 #-----------------------------------------------------  mi300 · models / quantized  -----------------------------------------------------#
@@ -982,7 +1124,7 @@ steps:
   working_dir: "/vllm-workspace/"
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_transformers.py
+  - pytest -v -s tests/models/transformers/test_backend.py
   - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
@@ -1023,6 +1165,11 @@ steps:
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
   # END: `stat_logger` plugins test
+  # BEGIN: `endpoint` plugins test
+  - pip install -e ./plugins/vllm_add_dummy_endpoint_plugin
+  - pytest -v -s plugins_tests/test_endpoint_plugins.py
+  - pip uninstall vllm_add_dummy_endpoint_plugin -y
+  # END: `endpoint` plugins test
   # BEGIN: other tests
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
@@ -1030,6 +1177,81 @@ steps:
   - pytest -v -s plugins_tests/test_oot_registration_online.py # it needs a clean process
   - pytest -v -s plugins_tests/test_oot_registration_offline.py # it needs a clean process
   - pytest -v -s plugins_tests/lora_resolvers # unit tests for in-tree lora resolver plugins
+
+- label: GGUF Plugin # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  soft_fail: true
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pip install "vllm-gguf-plugin >= 0.0.2"
+  - pytest -v -s plugins_tests/gguf
+
+#-------------------------------------------------------  mi300 · rust_frontend  -------------------------------------------------------#
+
+- label: Rust Frontend OpenAI Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
+  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
+  - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
+  - pytest -v -s entrypoints/openai/test_uds.py
+  - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
+
+- label: Rust Frontend Serve Admin Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
+  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
+  - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
+
+- label: Rust Frontend Core Correctness # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+
+- label: Rust Frontend Tool Use # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+
+- label: Rust Frontend Distributed # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
 
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
@@ -1087,7 +1309,7 @@ steps:
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
 
 #---------------------------------------------------------  mi300 · ray_compat  ---------------------------------------------------------#
@@ -1172,7 +1394,8 @@ steps:
 - label: Extract Hidden States Integration # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_1
+  agent_pool: mi300_2
+  num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -1199,7 +1422,7 @@ steps:
   - pytest -v -s v1/worker
   - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
   - pytest -v -s -m 'not cpu_test' v1/metrics
-  - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
+  - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
   # - export HSA_NO_SCRATCH_RECLAIM=1
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
@@ -1327,6 +1550,36 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+
+- label: MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+
+- label: MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+
 - label: V1 e2e (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
@@ -1430,16 +1683,6 @@ steps:
   - export VLLM_USE_DEEP_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
 
-- label: ROCm LM Eval Large Models (8 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_8
-  num_gpus: 8
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
-
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
 - label: Language Models Test (Extended Generation) # TBD
@@ -1456,7 +1699,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -1478,10 +1720,8 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
 
@@ -1497,53 +1737,30 @@ steps:
 
 #########################################################################################################################################
 #                                                                                                                                       #
+#                                                                 COPY A                                                                #
+#                                                                                                                                       #
+#########################################################################################################################################
+
+
+#########################################################################################################################################
+#                                                                                                                                       #
 #                                                         MI300 (gfx942) tests                                                          #
 #                                                                                                                                       #
 #########################################################################################################################################
 
-#--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
+#----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
-- label: Distributed Quick Reduce Tests (2 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_2
-  num_gpus: 2
-  working_dir: "/vllm-workspace/"
-  commands:
-  - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
-  - pytest -v -s tests/distributed/test_quick_all_reduce.py
-
-- label: Language Models Test (PPL) # TBD
+- label: COPY A PyTorch Fullgraph Smoke Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  working_dir: "/vllm-workspace/tests"
-  commands:
-  - pytest -v -s models/language/generation_ppl_test
-
-### Copy B ###
-
-- label: Copy-B PyTorch Compilation Unit Tests # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_1
-  torch_nightly: true
-  working_dir: "/vllm-workspace/tests"
-  commands:
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
-
-- label: Copy-B PyTorch Fullgraph Smoke Test # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
 
 #--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
 
-- label: Copy-B Pipeline + Context Parallelism (4 GPUs) # TBD
+- label: COPY A Pipeline + Context Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -1555,7 +1772,7 @@ steps:
 
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
-- label: Copy-B Kernels Helion Test # TBD
+- label: COPY A Kernels Helion Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1564,7 +1781,7 @@ steps:
   - pip install helion==1.1.0
   - pytest -v -s kernels/helion/
 
-- label: Copy-B Kernels Mamba Test # TBD
+- label: COPY A Kernels Mamba Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1574,19 +1791,18 @@ steps:
 
 #------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
 
-- label: Copy-B Basic Models Test (Other CPU) # TBD
+- label: COPY A Basic Models Test (Other CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   no_gpu: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/test_utils.py models/test_vision.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
-- label: Copy-B Language Models Test (MTEB) # TBD
+- label: COPY A Language Models Test (MTEB) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1594,7 +1810,17 @@ steps:
   commands:
   - pytest -v -s models/language/pooling_mteb_test
 
-- label: Copy-B Batch Invariance (H100-MI300) # TBD
+- label: COPY A Language Models Test (PPL) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -v -s models/language/generation_ppl_test
+
+#------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
+
+- label: COPY A Batch Invariance (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1605,7 +1831,7 @@ steps:
   - pytest -v -s v1/determinism/test_batch_invariance.py
   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
-- label: Copy-B Cudagraph # TBD
+- label: COPY A Cudagraph # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1614,7 +1840,7 @@ steps:
   - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
   - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
 
-- label: Copy-B e2e Core (1 GPU) # TBD
+- label: COPY A e2e Core (1 GPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1622,7 +1848,9 @@ steps:
   commands:
   - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
 
-- label: Copy-B Async Engine, Inputs, Utils, Worker, Config (CPU) # TBD
+#-------------------------------------------------------------  mi300 · misc  ------------------------------------------------------------#
+
+- label: COPY A Async Engine, Inputs, Utils, Worker, Config (CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1634,6 +1862,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
+  - pytest -v -s test_sampling_params.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
@@ -1643,6 +1872,37 @@ steps:
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
+#------------------------------------------------------------  mi300 · rust  -----------------------------------------------------------#
+
+- label: COPY A Rust Frontend Cargo Style + Clippy # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
+
+- label: COPY A Rust Frontend Cargo Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
+
+#-----------------------------------------------------------  mi300 · docker  ----------------------------------------------------------#
+
+- label: COPY A Docker Build Metadata (ROCm) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  no_gpu: true
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -v -s tools/test_docker_build_metadata_args.py
+
 #########################################################################################################################################
 #                                                                                                                                       #
 #                                                         MI300 (gfx942) tests                                                          #
@@ -1651,12 +1911,11 @@ steps:
 
 #-----------------------------------------------------  mi300 · basic_correctness  -----------------------------------------------------#
 
-- label: Copy-B Basic Correctness # TBD
+- label: COPY A Basic Correctness # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -1664,7 +1923,7 @@ steps:
   - VLLM_TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
 
-- label: Copy-B Distributed Model Tests (2 GPUs) # TBD
+- label: COPY A Distributed Model Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -1673,7 +1932,7 @@ steps:
   commands:
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
-  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
   - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
@@ -1681,7 +1940,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · benchmarks  ---------------------------------------------------------#
 
-- label: Copy-B Benchmarks CLI Test # TBD
+- label: COPY A Benchmarks CLI Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1691,7 +1950,15 @@ steps:
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
-- label: Copy-B Fusion E2E Config Sweep (H100-MI300) # TBD
+- label: COPY A PyTorch Compilation Unit Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+
+- label: COPY A Fusion E2E Config Sweep (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1701,7 +1968,7 @@ steps:
   - rocm-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
-- label: Copy-B Fusion E2E Quick (H100-MI300) # TBD
+- label: COPY A Fusion E2E Quick (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1714,7 +1981,7 @@ steps:
   # Different from CUDA, Qwen requires +rms_norm and +quant_fp8 as rms+quant fusion is only supported on AITER
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
-- label: Copy-B PyTorch Compilation Passes Unit Tests # TBD
+- label: COPY A PyTorch Compilation Passes Unit Tests # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1722,16 +1989,15 @@ steps:
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
-- label: Copy-B PyTorch Fullgraph # TBD
+- label: COPY A PyTorch Fullgraph # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
 
-- label: Copy-B Pytorch Nightly Dependency Override Check # TBD
+- label: COPY A Pytorch Nightly Dependency Override Check # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1740,7 +2006,7 @@ steps:
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
-- label: Copy-B Distributed Compile Unit Tests (2xH100-2xMI300) # TBD
+- label: COPY A Distributed Compile Unit Tests (2xH100-2xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -1753,7 +2019,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · cuda  ------------------------------------------------------------#
 
-- label: Copy-B Platform Tests # TBD
+- label: COPY A Platform Tests # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1764,7 +2030,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · detokenizer  --------------------------------------------------------#
 
-- label: Copy-B Async Engine, Inputs, Utils, Worker # TBD
+- label: COPY A Async Engine, Inputs, Utils, Worker # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1776,7 +2042,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
 
-- label: Copy-B Distributed Comm Ops # TBD
+- label: COPY A Distributed Comm Ops # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -1788,7 +2054,7 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
 
-- label: Copy-B EPLB Algorithm # TBD
+- label: COPY A EPLB Algorithm # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1797,7 +2063,7 @@ steps:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_utils.py
 
-- label: Copy-B EPLB Execution # TBD
+- label: COPY A EPLB Execution # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -1807,7 +2073,7 @@ steps:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
 
-- label: Copy-B Distributed Tests (2xH100-2xMI300) # TBD
+- label: COPY A Distributed Tests (2xH100-2xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -1822,7 +2088,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
   - pytest -v -s tests/distributed/test_packed_tensor.py
 
-- label: Copy-B Distributed Tests (4xA100-4xMI300) # TBD
+- label: COPY A Distributed Tests (4xA100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -1834,7 +2100,7 @@ steps:
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: Copy-B Distributed Torchrun + Examples (4 GPUs) # TBD
+- label: COPY A Distributed Torchrun + Examples (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -1852,7 +2118,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_ipc.py
 
-- label: Copy-B Elastic EP Scaling Test # TBD
+- label: COPY A Elastic EP Scaling Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -1861,7 +2127,7 @@ steps:
   commands:
   - pytest -v -s distributed/test_elastic_ep.py
 
-- label: Copy-B RayExecutorV2 (4 GPUs) # TBD
+- label: COPY A RayExecutorV2 (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -1874,7 +2140,7 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
 
-- label: Copy-B Distributed Tests (8xH100-8xMI300) # TBD
+- label: COPY A Distributed Tests (8xH100-8xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_8
@@ -1885,7 +2151,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · entrypoints  --------------------------------------------------------#
 
-- label: Copy-B Entrypoints Unit Tests # TBD
+- label: COPY A Entrypoints Unit Tests # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -1895,12 +2161,11 @@ steps:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/weight_transfer
 
-- label: Copy-B Entrypoints Integration (LLM) # TBD
+- label: COPY A Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -1908,47 +2173,44 @@ steps:
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
 
-- label: Copy-B Entrypoints Integration (API Server) # TBD
+- label: COPY A Entrypoints Integration (API Server) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
+  - pytest -v -s entrypoints/scale_out
 
-- label: Copy-B Entrypoints Integration (API Server OpenAI - Part 1) # TBD
+- label: COPY A Entrypoints Integration (API Server OpenAI - Part 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+  - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
-- label: Copy-B Entrypoints Integration (API Server OpenAI - Part 2) # TBD
+- label: COPY A Entrypoints Integration (API Server OpenAI - Part 2) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
-- label: Copy-B Entrypoints Integration (API Server Generate) # TBD
+- label: COPY A Entrypoints Integration (API Server Generate) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -1957,51 +2219,47 @@ steps:
   - pytest -v -s entrypoints/generate
   - pytest -v -s entrypoints/anthropic
 
-- label: Copy-B Entrypoints Integration (Responses API) # TBD
+- label: COPY A Entrypoints Integration (Responses API) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/responses
 
-- label: Copy-B Entrypoints Integration (Speech to Text) # TBD
+- label: COPY A Entrypoints Integration (Speech to Text) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/speech_to_text
 
-- label: Copy-B Entrypoints Integration (Multimodal)
+- label: COPY A Entrypoints Integration (Multimodal)
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
 
-- label: Copy-B Entrypoints Integration (Pooling) # TBD
+- label: COPY A Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
 
-- label: Copy-B OpenAI API correctness # TBD
+- label: COPY A OpenAI API correctness # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2012,7 +2270,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · evals  -----------------------------------------------------------#
 
-- label: Copy-B DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI300) # TBD
+- label: COPY A DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2021,7 +2279,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
 
-- label: Copy-B LM Eval Small Models # TBD
+- label: COPY A LM Eval Small Models # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2029,7 +2287,15 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
-- label: Copy-B LM Eval Small Models (MI300) # TBD
+- label: COPY A MRCR Eval Small Models # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
+
+- label: COPY A LM Eval Small Models (MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2037,7 +2303,7 @@ steps:
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
 
-- label: Copy-B Multi-Modal Accuracy Eval (Small Models) # TBD
+- label: COPY A Multi-Modal Accuracy Eval (Small Models) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2045,7 +2311,7 @@ steps:
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
-- label: Copy-B GPQA Eval (GPT-OSS) (2xH100-2xMI300) # TBD
+- label: COPY A GPQA Eval (GPT-OSS) (2xH100-2xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2055,7 +2321,15 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
 
-- label: Copy-B DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI300) # TBD
+- label: COPY A LM Eval Small Models (2xB200-2xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
+
+- label: COPY A DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2064,7 +2338,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
-- label: Copy-B LM Eval Large Models (4xA100-4xMI300) # TBD
+- label: COPY A LM Eval Large Models (4xA100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2074,7 +2348,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: Copy-B Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100-4xMI300) # TBD
+- label: COPY A Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2082,7 +2356,16 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
-- label: Copy-B Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
+- label: COPY A Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy (4xH100-4xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
+
+- label: COPY A Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2091,7 +2374,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
 
-- label: Copy-B LM Eval Large Models (8xH200-8xMI300) # TBD
+- label: COPY A LM Eval Large Models (8xH200-8xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_8
@@ -2101,9 +2384,19 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
+- label: COPY A ROCm LM Eval Large Models (8 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_8
+  num_gpus: 8
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
+
 #---------------------------------------------------------  mi300 · examples  ----------------------------------------------------------#
 
-- label: Copy-B Examples # TBD
+- label: COPY A Examples # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2133,7 +2426,16 @@ steps:
 
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
-- label: Copy-B Kernels Attention Test %N # TBD
+- label: COPY A vLLM IR Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/"
+  commands:
+  - pytest -v -s tests/ir
+  - pytest -v -s tests/kernels/ir
+
+- label: COPY A Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2142,7 +2444,7 @@ steps:
   commands:
   - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: Copy-B Kernels Core Operation Test # TBD
+- label: COPY A Kernels Core Operation Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2150,7 +2452,15 @@ steps:
   commands:
   - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
 
-- label: Copy-B Kernels MoE Test %N # TBD
+- label: COPY A Kernels KDA Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -v -s kernels/test_kda.py
+
+- label: COPY A Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2160,7 +2470,7 @@ steps:
   - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: Copy-B Kernels Quantization Test %N # TBD
+- label: COPY A Kernels Quantization Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2169,7 +2479,7 @@ steps:
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: Copy-B Kernels FP8 MoE Test (2xH100-2xMI300) # TBD
+- label: COPY A Kernels FP8 MoE Test (2xH100-2xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2179,7 +2489,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · lora  ------------------------------------------------------------#
 
-- label: Copy-B LoRA %N # TBD
+- label: COPY A LoRA %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2188,15 +2498,13 @@ steps:
   commands:
   - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
 
-- label: Copy-B LoRA TP (Distributed) # TBD
+- label: COPY A LoRA TP (Distributed) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   - pytest -v -s -x lora/test_chatglm3_tp.py
   - pytest -v -s -x lora/test_llama_tp.py
   - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
@@ -2206,11 +2514,10 @@ steps:
 
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
-- label: Copy-B Model Executor # TBD
+- label: COPY A Model Executor # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - apt-get update && apt-get install -y curl libsodium23
@@ -2218,38 +2525,112 @@ steps:
   - pytest -v -s model_executor -m '(not slow_test)'
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
-#------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
+#----------------------------------------------------  mi300 · model_runner_v2  -------------------------------------------------------#
 
-- label: Copy-B Basic Models Tests (Extra Initialization) %N # TBD
+- label: COPY A Model Runner V2 Core Tests # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
-  parallelism: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s v1/engine/test_llm_engine.py -k "not test_engine_metrics"
+  - ENFORCE_EAGER=1 pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram"
+  - pytest -v -s v1/e2e/general/test_context_length.py
+  - pytest -v -s v1/e2e/general/test_min_tokens.py
+  - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
+
+- label: COPY A Model Runner V2 Examples # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/examples"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pip install tensorizer
+  - python3 basic/offline_inference/chat.py
+  - python3 basic/offline_inference/generate.py --model facebook/opt-125m
+  - python3 generate/multimodal/audio_language_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
+  - python3 generate/multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
+  - python3 pooling/embed/vision_embedding_offline.py --seed 0
+  - python3 features/automatic_prefix_caching/prefix_caching_offline.py
+  - python3 deployment/llm_engine_example.py
+  - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+  - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+  - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+
+- label: COPY A Model Runner V2 Distributed (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/test_basic_correctness.py -m 'distributed(num_gpus=2)' -k "not ray and not True"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py -k "not ray"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+
+- label: COPY A Model Runner V2 Pipeline Parallelism (4 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
+  - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
+
+- label: COPY A Model Runner V2 Spec Decode # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
+  - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
+  - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
+  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
+
+#------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
+
+- label: COPY A Basic Models Tests (Extra Initialization) %N # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  parallelism: 6
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: Copy-B Basic Models Tests (Initialization) # TBD
+- label: COPY A Basic Models Tests (Initialization) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
-- label: Copy-B Basic Models Tests (Other) # TBD
+- label: COPY A Basic Models Tests (Other) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
-- label: Copy-B Language Models Test (Extended Pooling)  # TBD
+- label: COPY A Language Models Test (Extended Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2257,21 +2638,19 @@ steps:
   commands:
   - pytest -v -s models/language/pooling -m 'not core_model'
 
-- label: Copy-B Language Models Tests (Standard) # TBD
+- label: COPY A Language Models Tests (Standard) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
 
-- label: Copy-B Language Models Tests (Extra Standard) %N # TBD
+- label: COPY A Language Models Tests (Extra Standard) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2280,79 +2659,69 @@ steps:
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
 
-- label: Copy-B Multi-Modal Models (Extended Generation 1) # TBD
+- label: COPY A Multi-Modal Models (Extended Generation 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
   - pytest -v -s models/multimodal/test_mapping.py
 
-- label: Copy-B Multi-Modal Models (Extended Generation 2) # TBD
+- label: COPY A Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 
-- label: Copy-B Multi-Modal Models (Extended Generation 3) # TBD
+- label: COPY A Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
-- label: "Copy-B Multi-Modal Models (Standard) 1: qwen2" # TBD
+- label: "COPY A Multi-Modal Models (Standard) 1: qwen2" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
 
-- label: "Copy-B Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
+- label: "COPY A Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
 
-- label: "Copy-B Multi-Modal Models (Standard) 4: other + whisper" # TBD
+- label: "COPY A Multi-Modal Models (Standard) 4: other + whisper" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
-- label: Copy-B Multi-Modal Processor # 1h 42m
+- label: COPY A Multi-Modal Processor # 1h 42m
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
-- label: Copy-B Multi-Modal Processor (CPU) %N # TBD
+- label: COPY A Multi-Modal Processor (CPU) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2360,12 +2729,11 @@ steps:
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 #-----------------------------------------------------  mi300 · models / quantized  -----------------------------------------------------#
 
-- label: Copy-B Quantized Models Test # TBD
+- label: COPY A Quantized Models Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2375,7 +2743,7 @@ steps:
 
 #--------------------------------------------------  mi300 · models / transformers  ---------------------------------------------------#
 
-- label: Copy-B Transformers Nightly Models (Shardable) %N # TBD
+- label: COPY A Transformers Nightly Models (Shardable) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2386,14 +2754,14 @@ steps:
   - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - pytest -v -s tests/models/multimodal/processing/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: Copy-B Transformers Nightly Models (Single) # TBD
+- label: COPY A Transformers Nightly Models (Single) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/"
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_transformers.py
+  - pytest -v -s tests/models/transformers/test_backend.py
   - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
@@ -2401,7 +2769,7 @@ steps:
 
 #----------------------------------------------------------  mi300 · plugins  ----------------------------------------------------------#
 
-- label: Copy-B Plugin Tests (2 GPUs) # TBD
+- label: COPY A Plugin Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2434,6 +2802,11 @@ steps:
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
   # END: `stat_logger` plugins test
+  # BEGIN: `endpoint` plugins test
+  - pip install -e ./plugins/vllm_add_dummy_endpoint_plugin
+  - pytest -v -s plugins_tests/test_endpoint_plugins.py
+  - pip uninstall vllm_add_dummy_endpoint_plugin -y
+  # END: `endpoint` plugins test
   # BEGIN: other tests
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
@@ -2442,9 +2815,84 @@ steps:
   - pytest -v -s plugins_tests/test_oot_registration_offline.py # it needs a clean process
   - pytest -v -s plugins_tests/lora_resolvers # unit tests for in-tree lora resolver plugins
 
+- label: COPY A GGUF Plugin # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  soft_fail: true
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pip install "vllm-gguf-plugin >= 0.0.2"
+  - pytest -v -s plugins_tests/gguf
+
+#-------------------------------------------------------  mi300 · rust_frontend  -------------------------------------------------------#
+
+- label: COPY A Rust Frontend OpenAI Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
+  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
+  - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
+  - pytest -v -s entrypoints/openai/test_uds.py
+  - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
+
+- label: COPY A Rust Frontend Serve Admin Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
+  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
+  - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
+
+- label: COPY A Rust Frontend Core Correctness # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+
+- label: COPY A Rust Frontend Tool Use # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+
+- label: COPY A Rust Frontend Distributed # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
+
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
-- label: Copy-B Quantization # TBD
+- label: COPY A Quantization # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2464,7 +2912,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · rocm  ------------------------------------------------------------#
 
-- label: Copy-B ROCm AITER Ops Test # TBD
+- label: COPY A ROCm AITER Ops Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2474,7 +2922,7 @@ steps:
 
 #---------------------------------------------------------  mi300 · samplers  ----------------------------------------------------------#
 
-- label: Copy-B Samplers Test # TBD
+- label: COPY A Samplers Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2484,7 +2932,7 @@ steps:
 
 #------------------------------------------------------------  mi300 · misc  ------------------------------------------------------------#
 
-- label: Copy-B Python-only Installation # TBD
+- label: COPY A Python-only Installation # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2492,18 +2940,18 @@ steps:
   commands:
   - bash standalone_tests/python_only_compile.sh
 
-- label: Copy-B Regression # TBD
+- label: COPY A Regression # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
 
 #---------------------------------------------------------  mi300 · ray_compat  ---------------------------------------------------------#
 
-- label: Copy-B Ray Dependency Compatibility Check # TBD
+- label: COPY A Ray Dependency Compatibility Check # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2513,7 +2961,7 @@ steps:
 
 #------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
 
-- label: Copy-B Acceptance Length Test (Large Models) # TBD
+- label: COPY A Acceptance Length Test (Large Models) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2522,7 +2970,7 @@ steps:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
   - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
-- label: Copy-B e2e Scheduling (1 GPU) # TBD
+- label: COPY A e2e Scheduling (1 GPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2530,7 +2978,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
 
-- label: Copy-B Engine (1 GPU) # TBD
+- label: COPY A Engine (1 GPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2539,7 +2987,7 @@ steps:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
 
-- label: Copy-B Spec Decode Draft Model # TBD
+- label: COPY A Spec Decode Draft Model # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2547,7 +2995,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
 
-- label: Copy-B Spec Decode Eagle # TBD
+- label: COPY A Spec Decode Eagle # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2555,7 +3003,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
 
-- label: Copy-B Spec Decode Ngram + Suffix # TBD
+- label: COPY A Spec Decode Ngram + Suffix # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2563,7 +3011,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
 
-- label: Copy-B Spec Decode Speculators + MTP # TBD
+- label: COPY A Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2571,7 +3019,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
 
-- label: Copy-B Speculators Correctness # TBD
+- label: COPY A Speculators Correctness # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2580,16 +3028,17 @@ steps:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
   - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
 
-- label: Copy-B Extract Hidden States Integration # TBD
+- label: COPY A Extract Hidden States Integration # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_1
+  agent_pool: mi300_2
+  num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s v1/kv_connector/extract_hidden_states_integration
 
-- label: Copy-B V1 attention (H100-MI300) # TBD
+- label: COPY A V1 attention (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2597,7 +3046,7 @@ steps:
   commands:
   - pytest -v -s v1/attention
 
-- label: Copy-B V1 Core + KV + Metrics # TBD
+- label: COPY A V1 Core + KV + Metrics # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2610,11 +3059,11 @@ steps:
   - pytest -v -s v1/worker
   - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
   - pytest -v -s -m 'not cpu_test' v1/metrics
-  - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
+  - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
   # - export HSA_NO_SCRATCH_RECLAIM=1
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
-- label: Copy-B V1 others (CPU) # TBD
+- label: COPY A V1 others (CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2627,7 +3076,7 @@ steps:
   - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
   - pytest -v -s -m 'cpu_test' v1/metrics
 
-- label: Copy-B V1 Sample + Logits # TBD
+- label: COPY A V1 Sample + Logits # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2639,7 +3088,7 @@ steps:
   - pytest -v -s v1/test_request.py
   - pytest -v -s v1/test_outputs.py
 
-- label: Copy-B Distributed DP Tests (2 GPUs) # TBD
+- label: COPY A Distributed DP Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2651,7 +3100,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
 
-- label: Copy-B Metrics, Tracing (2 GPUs) # TBD
+- label: COPY A Metrics, Tracing (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2665,7 +3114,7 @@ steps:
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s v1/tracing
 
-- label: Copy-B V1 e2e (2 GPUs) # TBD
+- label: COPY A V1 e2e (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2673,7 +3122,7 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
-- label: Copy-B NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
+- label: COPY A NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2683,7 +3132,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
 
-- label: Copy-B CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
+- label: COPY A CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2693,7 +3142,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: Copy-B Distributed DP Tests (4 GPUs) # TBD
+- label: COPY A Distributed DP Tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2708,7 +3157,7 @@ steps:
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
   - pytest -v -s distributed/test_utils.py
 
-- label: Copy-B Distributed NixlConnector PD accuracy (4 GPUs)  # TBD
+- label: COPY A Distributed NixlConnector PD accuracy (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2718,7 +3167,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: Copy-B DP EP Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
+- label: COPY A DP EP Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2728,7 +3177,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: Copy-B Hybrid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
+- label: COPY A Hybrid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2738,7 +3187,37 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: Copy-B V1 e2e (4 GPUs) # TBD
+- label: COPY A Hybrid SSM NixlConnector PD prefix cache test (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+
+- label: COPY A MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+
+- label: COPY A MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+
+- label: COPY A V1 e2e (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2746,7 +3225,7 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
-- label: Copy-B V1 e2e (4xH100-4xMI300) # TBD
+- label: COPY A V1 e2e (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2755,7 +3234,7 @@ steps:
 
 #------------------------------------------------------  mi300 · weight_loading  -------------------------------------------------------#
 
-- label: Copy-B Weight Loading Multiple GPU # TBD
+- label: COPY A Weight Loading Multiple GPU # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2764,7 +3243,7 @@ steps:
   commands:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
-- label: Copy-B Weight Loading Multiple GPU - Large Models # TBD
+- label: COPY A Weight Loading Multiple GPU - Large Models # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2781,7 +3260,7 @@ steps:
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
-- label: Copy-B Distributed Compile + RPC Tests (2 GPUs) # TBD
+- label: COPY A Distributed Compile + RPC Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2794,7 +3273,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
 
-- label: Copy-B Distributed Torchrun + Shutdown Tests (2 GPUs) # TBD
+- label: COPY A Distributed Torchrun + Shutdown Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -2806,7 +3285,7 @@ steps:
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
-- label: Copy-B Distributed Compile + Comm (4 GPUs) # TBD
+- label: COPY A Distributed Compile + Comm (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2821,7 +3300,7 @@ steps:
 
 #----------------------------------------------------------  mi300 · engine  -----------------------------------------------------------#
 
-- label: Copy-B Engine # TBD
+- label: COPY A Engine # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2831,7 +3310,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · evals  -----------------------------------------------------------#
 
-- label: Copy-B LM Eval Large Models (4xH100-4xMI300) # TBD
+- label: COPY A LM Eval Large Models (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2841,19 +3320,9 @@ steps:
   - export VLLM_USE_DEEP_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
 
-- label: Copy-B ROCm LM Eval Large Models (8 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_8
-  num_gpus: 8
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
-
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
-- label: Copy-B Language Models Test (Extended Generation) # TBD
+- label: COPY A Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2863,11 +3332,10 @@ steps:
   - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
-- label: Copy-B Language Models Tests (Hybrid) %N # TBD
+- label: COPY A Language Models Tests (Hybrid) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -2877,7 +3345,7 @@ steps:
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
 
-- label: Copy-B Multi-Modal Models (Extended Pooling) # TBD
+- label: COPY A Multi-Modal Models (Extended Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2885,20 +3353,18 @@ steps:
   commands:
   - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
-- label: "Copy-B Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
+- label: "COPY A Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
 
 #------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
 
-- label: Copy-B V1 Spec Decode # TBD
+- label: COPY A V1 Spec Decode # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2908,53 +3374,30 @@ steps:
 
 #########################################################################################################################################
 #                                                                                                                                       #
+#                                                                 COPY B                                                                #
+#                                                                                                                                       #
+#########################################################################################################################################
+
+
+#########################################################################################################################################
+#                                                                                                                                       #
 #                                                         MI300 (gfx942) tests                                                          #
 #                                                                                                                                       #
 #########################################################################################################################################
 
-#--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
+#----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
-- label: Copy-B Distributed Quick Reduce Tests (2 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_2
-  num_gpus: 2
-  working_dir: "/vllm-workspace/"
-  commands:
-  - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
-  - pytest -v -s tests/distributed/test_quick_all_reduce.py
-
-- label: Copy-B Language Models Test (PPL) # TBD
+- label: COPY B PyTorch Fullgraph Smoke Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  working_dir: "/vllm-workspace/tests"
-  commands:
-  - pytest -v -s models/language/generation_ppl_test
-
-### Copy C ###
-
-- label: COPY-C PyTorch Compilation Unit Tests # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_1
-  torch_nightly: true
-  working_dir: "/vllm-workspace/tests"
-  commands:
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
-
-- label: COPY-C PyTorch Fullgraph Smoke Test # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
 
 #--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
 
-- label: COPY-C Pipeline + Context Parallelism (4 GPUs) # TBD
+- label: COPY B Pipeline + Context Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -2966,7 +3409,7 @@ steps:
 
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
-- label: COPY-C Kernels Helion Test # TBD
+- label: COPY B Kernels Helion Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2975,7 +3418,7 @@ steps:
   - pip install helion==1.1.0
   - pytest -v -s kernels/helion/
 
-- label: COPY-C Kernels Mamba Test # TBD
+- label: COPY B Kernels Mamba Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -2985,19 +3428,18 @@ steps:
 
 #------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
 
-- label: COPY-C Basic Models Test (Other CPU) # TBD
+- label: COPY B Basic Models Test (Other CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   no_gpu: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/test_utils.py models/test_vision.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
-- label: COPY-C Language Models Test (MTEB) # TBD
+- label: COPY B Language Models Test (MTEB) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3005,7 +3447,17 @@ steps:
   commands:
   - pytest -v -s models/language/pooling_mteb_test
 
-- label: COPY-C Batch Invariance (H100-MI300) # TBD
+- label: COPY B Language Models Test (PPL) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -v -s models/language/generation_ppl_test
+
+#------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
+
+- label: COPY B Batch Invariance (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3016,7 +3468,7 @@ steps:
   - pytest -v -s v1/determinism/test_batch_invariance.py
   - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
-- label: COPY-C Cudagraph # TBD
+- label: COPY B Cudagraph # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3025,7 +3477,7 @@ steps:
   - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
   - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
 
-- label: COPY-C e2e Core (1 GPU) # TBD
+- label: COPY B e2e Core (1 GPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3033,7 +3485,9 @@ steps:
   commands:
   - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
 
-- label: COPY-C Async Engine, Inputs, Utils, Worker, Config (CPU) # TBD
+#-------------------------------------------------------------  mi300 · misc  ------------------------------------------------------------#
+
+- label: COPY B Async Engine, Inputs, Utils, Worker, Config (CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3045,6 +3499,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
+  - pytest -v -s test_sampling_params.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
@@ -3054,6 +3509,37 @@ steps:
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
+#------------------------------------------------------------  mi300 · rust  -----------------------------------------------------------#
+
+- label: COPY B Rust Frontend Cargo Style + Clippy # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
+
+- label: COPY B Rust Frontend Cargo Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
+
+#-----------------------------------------------------------  mi300 · docker  ----------------------------------------------------------#
+
+- label: COPY B Docker Build Metadata (ROCm) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  no_gpu: true
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -v -s tools/test_docker_build_metadata_args.py
+
 #########################################################################################################################################
 #                                                                                                                                       #
 #                                                         MI300 (gfx942) tests                                                          #
@@ -3062,12 +3548,11 @@ steps:
 
 #-----------------------------------------------------  mi300 · basic_correctness  -----------------------------------------------------#
 
-- label: COPY-C Basic Correctness # TBD
+- label: COPY B Basic Correctness # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -3075,7 +3560,7 @@ steps:
   - VLLM_TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
 
-- label: COPY-C Distributed Model Tests (2 GPUs) # TBD
+- label: COPY B Distributed Model Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -3084,7 +3569,7 @@ steps:
   commands:
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
-  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
   - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
@@ -3092,7 +3577,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · benchmarks  ---------------------------------------------------------#
 
-- label: COPY-C Benchmarks CLI Test # TBD
+- label: COPY B Benchmarks CLI Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3102,7 +3587,15 @@ steps:
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
-- label: COPY-C Fusion E2E Config Sweep (H100-MI300) # TBD
+- label: COPY B PyTorch Compilation Unit Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+
+- label: COPY B Fusion E2E Config Sweep (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3112,7 +3605,7 @@ steps:
   - rocm-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
-- label: COPY-C Fusion E2E Quick (H100-MI300) # TBD
+- label: COPY B Fusion E2E Quick (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3125,7 +3618,7 @@ steps:
   # Different from CUDA, Qwen requires +rms_norm and +quant_fp8 as rms+quant fusion is only supported on AITER
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
 
-- label: COPY-C PyTorch Compilation Passes Unit Tests # TBD
+- label: COPY B PyTorch Compilation Passes Unit Tests # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3133,16 +3626,15 @@ steps:
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
-- label: COPY-C PyTorch Fullgraph # TBD
+- label: COPY B PyTorch Fullgraph # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
 
-- label: COPY-C Pytorch Nightly Dependency Override Check # TBD
+- label: COPY B Pytorch Nightly Dependency Override Check # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3151,7 +3643,7 @@ steps:
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
-- label: COPY-C Distributed Compile Unit Tests (2xH100-2xMI300) # TBD
+- label: COPY B Distributed Compile Unit Tests (2xH100-2xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -3164,7 +3656,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · cuda  ------------------------------------------------------------#
 
-- label: COPY-C Platform Tests # TBD
+- label: COPY B Platform Tests # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3175,7 +3667,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · detokenizer  --------------------------------------------------------#
 
-- label: COPY-C Async Engine, Inputs, Utils, Worker # TBD
+- label: COPY B Async Engine, Inputs, Utils, Worker # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3187,7 +3679,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
 
-- label: COPY-C Distributed Comm Ops # TBD
+- label: COPY B Distributed Comm Ops # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -3199,7 +3691,7 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
 
-- label: COPY-C EPLB Algorithm # TBD
+- label: COPY B EPLB Algorithm # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3208,7 +3700,7 @@ steps:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_utils.py
 
-- label: COPY-C EPLB Execution # TBD
+- label: COPY B EPLB Execution # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -3218,7 +3710,7 @@ steps:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
 
-- label: COPY-C Distributed Tests (2xH100-2xMI300) # TBD
+- label: COPY B Distributed Tests (2xH100-2xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -3233,7 +3725,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
   - pytest -v -s tests/distributed/test_packed_tensor.py
 
-- label: COPY-C Distributed Tests (4xA100-4xMI300) # TBD
+- label: COPY B Distributed Tests (4xA100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -3245,7 +3737,7 @@ steps:
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: COPY-C Distributed Torchrun + Examples (4 GPUs) # TBD
+- label: COPY B Distributed Torchrun + Examples (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -3263,7 +3755,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_nccl.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 ../examples/rl/rlhf_ipc.py
 
-- label: COPY-C Elastic EP Scaling Test # TBD
+- label: COPY B Elastic EP Scaling Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -3272,7 +3764,7 @@ steps:
   commands:
   - pytest -v -s distributed/test_elastic_ep.py
 
-- label: COPY-C RayExecutorV2 (4 GPUs) # TBD
+- label: COPY B RayExecutorV2 (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -3285,7 +3777,7 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
   - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
 
-- label: COPY-C Distributed Tests (8xH100-8xMI300) # TBD
+- label: COPY B Distributed Tests (8xH100-8xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_8
@@ -3296,7 +3788,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · entrypoints  --------------------------------------------------------#
 
-- label: COPY-C Entrypoints Unit Tests # TBD
+- label: COPY B Entrypoints Unit Tests # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3306,12 +3798,11 @@ steps:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/weight_transfer
 
-- label: COPY-C Entrypoints Integration (LLM) # TBD
+- label: COPY B Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -3319,47 +3810,44 @@ steps:
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
 
-- label: COPY-C Entrypoints Integration (API Server) # TBD
+- label: COPY B Entrypoints Integration (API Server) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
+  - pytest -v -s entrypoints/scale_out
 
-- label: COPY-C Entrypoints Integration (API Server OpenAI - Part 1) # TBD
+- label: COPY B Entrypoints Integration (API Server OpenAI - Part 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+  - pytest -v -s entrypoints/openai/ --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
 
-- label: COPY-C Entrypoints Integration (API Server OpenAI - Part 2) # TBD
+- label: COPY B Entrypoints Integration (API Server OpenAI - Part 2) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
-- label: COPY-C Entrypoints Integration (API Server Generate) # TBD
+- label: COPY B Entrypoints Integration (API Server Generate) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -3368,51 +3856,47 @@ steps:
   - pytest -v -s entrypoints/generate
   - pytest -v -s entrypoints/anthropic
 
-- label: COPY-C Entrypoints Integration (Responses API) # TBD
+- label: COPY B Entrypoints Integration (Responses API) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/responses
 
-- label: COPY-C Entrypoints Integration (Speech to Text) # TBD
+- label: COPY B Entrypoints Integration (Speech to Text) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/speech_to_text
 
-- label: COPY-C Entrypoints Integration (Multimodal)
+- label: COPY B Entrypoints Integration (Multimodal)
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
 
-- label: COPY-C Entrypoints Integration (Pooling) # TBD
+- label: COPY B Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   fast_check: true
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
 
-- label: COPY-C OpenAI API correctness # TBD
+- label: COPY B OpenAI API correctness # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3423,7 +3907,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · evals  -----------------------------------------------------------#
 
-- label: COPY-C DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI300) # TBD
+- label: COPY B DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3432,7 +3916,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
 
-- label: COPY-C LM Eval Small Models # TBD
+- label: COPY B LM Eval Small Models # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3440,7 +3924,15 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
-- label: COPY-C LM Eval Small Models (MI300) # TBD
+- label: COPY B MRCR Eval Small Models # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
+
+- label: COPY B LM Eval Small Models (MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3448,7 +3940,7 @@ steps:
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
 
-- label: COPY-C Multi-Modal Accuracy Eval (Small Models) # TBD
+- label: COPY B Multi-Modal Accuracy Eval (Small Models) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3456,7 +3948,7 @@ steps:
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
-- label: COPY-C GPQA Eval (GPT-OSS) (2xH100-2xMI300) # TBD
+- label: COPY B GPQA Eval (GPT-OSS) (2xH100-2xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -3466,7 +3958,15 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
 
-- label: COPY-C DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI300) # TBD
+- label: COPY B LM Eval Small Models (2xB200-2xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
+
+- label: COPY B DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -3475,7 +3975,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
-- label: COPY-C LM Eval Large Models (4xA100-4xMI300) # TBD
+- label: COPY B LM Eval Large Models (4xA100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -3485,7 +3985,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: COPY-C Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100-4xMI300) # TBD
+- label: COPY B Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -3493,7 +3993,16 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
-- label: COPY-C Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
+- label: COPY B Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy (4xH100-4xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
+
+- label: COPY B Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -3502,7 +4011,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
 
-- label: COPY-C LM Eval Large Models (8xH200-8xMI300) # TBD
+- label: COPY B LM Eval Large Models (8xH200-8xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_8
@@ -3512,9 +4021,19 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
+- label: COPY B ROCm LM Eval Large Models (8 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_8
+  num_gpus: 8
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
+
 #---------------------------------------------------------  mi300 · examples  ----------------------------------------------------------#
 
-- label: COPY-C Examples # TBD
+- label: COPY B Examples # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3544,7 +4063,16 @@ steps:
 
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
-- label: COPY-C Kernels Attention Test %N # TBD
+- label: COPY B vLLM IR Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/"
+  commands:
+  - pytest -v -s tests/ir
+  - pytest -v -s tests/kernels/ir
+
+- label: COPY B Kernels Attention Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3553,7 +4081,7 @@ steps:
   commands:
   - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: COPY-C Kernels Core Operation Test # TBD
+- label: COPY B Kernels Core Operation Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3561,7 +4089,15 @@ steps:
   commands:
   - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
 
-- label: COPY-C Kernels MoE Test %N # TBD
+- label: COPY B Kernels KDA Test # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pytest -v -s kernels/test_kda.py
+
+- label: COPY B Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3571,7 +4107,7 @@ steps:
   - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: COPY-C Kernels Quantization Test %N # TBD
+- label: COPY B Kernels Quantization Test %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3580,7 +4116,7 @@ steps:
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: COPY-C Kernels FP8 MoE Test (2xH100-2xMI300) # TBD
+- label: COPY B Kernels FP8 MoE Test (2xH100-2xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -3590,7 +4126,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · lora  ------------------------------------------------------------#
 
-- label: COPY-C LoRA %N # TBD
+- label: COPY B LoRA %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3599,15 +4135,13 @@ steps:
   commands:
   - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
 
-- label: COPY-C LoRA TP (Distributed) # TBD
+- label: COPY B LoRA TP (Distributed) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   - pytest -v -s -x lora/test_chatglm3_tp.py
   - pytest -v -s -x lora/test_llama_tp.py
   - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
@@ -3617,11 +4151,10 @@ steps:
 
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
-- label: COPY-C Model Executor # TBD
+- label: COPY B Model Executor # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - apt-get update && apt-get install -y curl libsodium23
@@ -3629,38 +4162,112 @@ steps:
   - pytest -v -s model_executor -m '(not slow_test)'
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
-#------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
+#----------------------------------------------------  mi300 · model_runner_v2  -------------------------------------------------------#
 
-- label: COPY-C Basic Models Tests (Extra Initialization) %N # TBD
+- label: COPY B Model Runner V2 Core Tests # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
-  parallelism: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s v1/engine/test_llm_engine.py -k "not test_engine_metrics"
+  - ENFORCE_EAGER=1 pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram"
+  - pytest -v -s v1/e2e/general/test_context_length.py
+  - pytest -v -s v1/e2e/general/test_min_tokens.py
+  - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
+
+- label: COPY B Model Runner V2 Examples # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/examples"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pip install tensorizer
+  - python3 basic/offline_inference/chat.py
+  - python3 basic/offline_inference/generate.py --model facebook/opt-125m
+  - python3 generate/multimodal/audio_language_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
+  - python3 generate/multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
+  - python3 pooling/embed/vision_embedding_offline.py --seed 0
+  - python3 features/automatic_prefix_caching/prefix_caching_offline.py
+  - python3 deployment/llm_engine_example.py
+  - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+  - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+  - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+
+- label: COPY B Model Runner V2 Distributed (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/test_basic_correctness.py -m 'distributed(num_gpus=2)' -k "not ray and not True"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py -k "not ray"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+
+- label: COPY B Model Runner V2 Pipeline Parallelism (4 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
+  - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
+
+- label: COPY B Model Runner V2 Spec Decode # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
+  - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
+  - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
+  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
+
+#------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
+
+- label: COPY B Basic Models Tests (Extra Initialization) %N # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  parallelism: 6
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: COPY-C Basic Models Tests (Initialization) # TBD
+- label: COPY B Basic Models Tests (Initialization) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
-- label: COPY-C Basic Models Tests (Other) # TBD
+- label: COPY B Basic Models Tests (Other) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
-- label: COPY-C Language Models Test (Extended Pooling)  # TBD
+- label: COPY B Language Models Test (Extended Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3668,21 +4275,19 @@ steps:
   commands:
   - pytest -v -s models/language/pooling -m 'not core_model'
 
-- label: COPY-C Language Models Tests (Standard) # TBD
+- label: COPY B Language Models Tests (Standard) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
 
-- label: COPY-C Language Models Tests (Extra Standard) %N # TBD
+- label: COPY B Language Models Tests (Extra Standard) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -3691,79 +4296,69 @@ steps:
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
 
-- label: COPY-C Multi-Modal Models (Extended Generation 1) # TBD
+- label: COPY B Multi-Modal Models (Extended Generation 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
   - pytest -v -s models/multimodal/test_mapping.py
 
-- label: COPY-C Multi-Modal Models (Extended Generation 2) # TBD
+- label: COPY B Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 
-- label: COPY-C Multi-Modal Models (Extended Generation 3) # TBD
+- label: COPY B Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
-- label: "COPY-C Multi-Modal Models (Standard) 1: qwen2" # TBD
+- label: "COPY B Multi-Modal Models (Standard) 1: qwen2" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
 
-- label: "COPY-C Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
+- label: "COPY B Multi-Modal Models (Standard) 3: llava + qwen2_vl" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
 
-- label: "COPY-C Multi-Modal Models (Standard) 4: other + whisper" # TBD
+- label: "COPY B Multi-Modal Models (Standard) 4: other + whisper" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
-- label: COPY-C Multi-Modal Processor # 1h 42m
+- label: COPY B Multi-Modal Processor # 1h 42m
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
-- label: COPY-C Multi-Modal Processor (CPU) %N # TBD
+- label: COPY B Multi-Modal Processor (CPU) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3771,12 +4366,11 @@ steps:
   no_gpu: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 #-----------------------------------------------------  mi300 · models / quantized  -----------------------------------------------------#
 
-- label: COPY-C Quantized Models Test # TBD
+- label: COPY B Quantized Models Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3786,7 +4380,7 @@ steps:
 
 #--------------------------------------------------  mi300 · models / transformers  ---------------------------------------------------#
 
-- label: COPY-C Transformers Nightly Models (Shardable) %N # TBD
+- label: COPY B Transformers Nightly Models (Shardable) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3797,14 +4391,14 @@ steps:
   - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   - pytest -v -s tests/models/multimodal/processing/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: COPY-C Transformers Nightly Models (Single) # TBD
+- label: COPY B Transformers Nightly Models (Single) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/"
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_transformers.py
+  - pytest -v -s tests/models/transformers/test_backend.py
   - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
@@ -3812,7 +4406,7 @@ steps:
 
 #----------------------------------------------------------  mi300 · plugins  ----------------------------------------------------------#
 
-- label: COPY-C Plugin Tests (2 GPUs) # TBD
+- label: COPY B Plugin Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -3845,6 +4439,11 @@ steps:
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
   # END: `stat_logger` plugins test
+  # BEGIN: `endpoint` plugins test
+  - pip install -e ./plugins/vllm_add_dummy_endpoint_plugin
+  - pytest -v -s plugins_tests/test_endpoint_plugins.py
+  - pip uninstall vllm_add_dummy_endpoint_plugin -y
+  # END: `endpoint` plugins test
   # BEGIN: other tests
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
@@ -3853,9 +4452,84 @@ steps:
   - pytest -v -s plugins_tests/test_oot_registration_offline.py # it needs a clean process
   - pytest -v -s plugins_tests/lora_resolvers # unit tests for in-tree lora resolver plugins
 
+- label: COPY B GGUF Plugin # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  soft_fail: true
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - pip install "vllm-gguf-plugin >= 0.0.2"
+  - pytest -v -s plugins_tests/gguf
+
+#-------------------------------------------------------  mi300 · rust_frontend  -------------------------------------------------------#
+
+- label: COPY B Rust Frontend OpenAI Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
+  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
+  - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
+  - pytest -v -s entrypoints/openai/test_uds.py
+  - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
+
+- label: COPY B Rust Frontend Serve Admin Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
+  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
+  - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
+
+- label: COPY B Rust Frontend Core Correctness # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+
+- label: COPY B Rust Frontend Tool Use # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_1
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+
+- label: COPY B Rust Frontend Distributed # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
+
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
-- label: COPY-C Quantization # TBD
+- label: COPY B Quantization # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3875,7 +4549,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · rocm  ------------------------------------------------------------#
 
-- label: COPY-C ROCm AITER Ops Test # TBD
+- label: COPY B ROCm AITER Ops Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3885,7 +4559,7 @@ steps:
 
 #---------------------------------------------------------  mi300 · samplers  ----------------------------------------------------------#
 
-- label: COPY-C Samplers Test # TBD
+- label: COPY B Samplers Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3895,7 +4569,7 @@ steps:
 
 #------------------------------------------------------------  mi300 · misc  ------------------------------------------------------------#
 
-- label: COPY-C Python-only Installation # TBD
+- label: COPY B Python-only Installation # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3903,18 +4577,18 @@ steps:
   commands:
   - bash standalone_tests/python_only_compile.sh
 
-- label: COPY-C Regression # TBD
+- label: COPY B Regression # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
 
 #---------------------------------------------------------  mi300 · ray_compat  ---------------------------------------------------------#
 
-- label: COPY-C Ray Dependency Compatibility Check # TBD
+- label: COPY B Ray Dependency Compatibility Check # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3924,7 +4598,7 @@ steps:
 
 #------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
 
-- label: COPY-C Acceptance Length Test (Large Models) # TBD
+- label: COPY B Acceptance Length Test (Large Models) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3933,7 +4607,7 @@ steps:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
   - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
-- label: COPY-C e2e Scheduling (1 GPU) # TBD
+- label: COPY B e2e Scheduling (1 GPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3941,7 +4615,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
 
-- label: COPY-C Engine (1 GPU) # TBD
+- label: COPY B Engine (1 GPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3950,7 +4624,7 @@ steps:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
 
-- label: COPY-C Spec Decode Draft Model # TBD
+- label: COPY B Spec Decode Draft Model # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3958,7 +4632,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
 
-- label: COPY-C Spec Decode Eagle # TBD
+- label: COPY B Spec Decode Eagle # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3966,7 +4640,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
 
-- label: COPY-C Spec Decode Ngram + Suffix # TBD
+- label: COPY B Spec Decode Ngram + Suffix # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3974,7 +4648,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
 
-- label: COPY-C Spec Decode Speculators + MTP # TBD
+- label: COPY B Spec Decode Speculators + MTP # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3982,7 +4656,7 @@ steps:
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
 
-- label: COPY-C Speculators Correctness # TBD
+- label: COPY B Speculators Correctness # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -3991,16 +4665,17 @@ steps:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
   - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
 
-- label: COPY-C Extract Hidden States Integration # TBD
+- label: COPY B Extract Hidden States Integration # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_1
+  agent_pool: mi300_2
+  num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s v1/kv_connector/extract_hidden_states_integration
 
-- label: COPY-C V1 attention (H100-MI300) # TBD
+- label: COPY B V1 attention (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -4008,7 +4683,7 @@ steps:
   commands:
   - pytest -v -s v1/attention
 
-- label: COPY-C V1 Core + KV + Metrics # TBD
+- label: COPY B V1 Core + KV + Metrics # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -4021,11 +4696,11 @@ steps:
   - pytest -v -s v1/worker
   - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
   - pytest -v -s -m 'not cpu_test' v1/metrics
-  - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
+  - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
   # - export HSA_NO_SCRATCH_RECLAIM=1
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
-- label: COPY-C V1 others (CPU) # TBD
+- label: COPY B V1 others (CPU) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -4038,7 +4713,7 @@ steps:
   - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
   - pytest -v -s -m 'cpu_test' v1/metrics
 
-- label: COPY-C V1 Sample + Logits # TBD
+- label: COPY B V1 Sample + Logits # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -4050,7 +4725,7 @@ steps:
   - pytest -v -s v1/test_request.py
   - pytest -v -s v1/test_outputs.py
 
-- label: COPY-C Distributed DP Tests (2 GPUs) # TBD
+- label: COPY B Distributed DP Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -4062,7 +4737,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
 
-- label: COPY-C Metrics, Tracing (2 GPUs) # TBD
+- label: COPY B Metrics, Tracing (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -4076,7 +4751,7 @@ steps:
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s v1/tracing
 
-- label: COPY-C V1 e2e (2 GPUs) # TBD
+- label: COPY B V1 e2e (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -4084,7 +4759,7 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
-- label: COPY-C NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
+- label: COPY B NixlConnector PD + Spec Decode acceptance (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -4094,7 +4769,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
 
-- label: COPY-C CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
+- label: COPY B CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -4104,7 +4779,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: COPY-C Distributed DP Tests (4 GPUs) # TBD
+- label: COPY B Distributed DP Tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -4119,7 +4794,7 @@ steps:
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
   - pytest -v -s distributed/test_utils.py
 
-- label: COPY-C Distributed NixlConnector PD accuracy (4 GPUs)  # TBD
+- label: COPY B Distributed NixlConnector PD accuracy (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -4129,7 +4804,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: COPY-C DP EP Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
+- label: COPY B DP EP Distributed NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -4139,7 +4814,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: COPY-C Hybrid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
+- label: COPY B Hybrid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -4149,7 +4824,37 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: COPY-C V1 e2e (4 GPUs) # TBD
+- label: COPY B Hybrid SSM NixlConnector PD prefix cache test (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+
+- label: COPY B MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+
+- label: COPY B MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdshadow]
+  agent_pool: mi300_2
+  num_gpus: 2
+  working_dir: "/vllm-workspace/tests"
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+
+- label: COPY B V1 e2e (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -4157,7 +4862,7 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
 
-- label: COPY-C V1 e2e (4xH100-4xMI300) # TBD
+- label: COPY B V1 e2e (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -4166,7 +4871,7 @@ steps:
 
 #------------------------------------------------------  mi300 · weight_loading  -------------------------------------------------------#
 
-- label: COPY-C Weight Loading Multiple GPU # TBD
+- label: COPY B Weight Loading Multiple GPU # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -4175,7 +4880,7 @@ steps:
   commands:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
-- label: COPY-C Weight Loading Multiple GPU - Large Models # TBD
+- label: COPY B Weight Loading Multiple GPU - Large Models # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -4192,7 +4897,7 @@ steps:
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
 
-- label: COPY-C Distributed Compile + RPC Tests (2 GPUs) # TBD
+- label: COPY B Distributed Compile + RPC Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -4205,7 +4910,7 @@ steps:
 
 #--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
 
-- label: COPY-C Distributed Torchrun + Shutdown Tests (2 GPUs) # TBD
+- label: COPY B Distributed Torchrun + Shutdown Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_2
@@ -4217,7 +4922,7 @@ steps:
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
-- label: COPY-C Distributed Compile + Comm (4 GPUs) # TBD
+- label: COPY B Distributed Compile + Comm (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -4232,7 +4937,7 @@ steps:
 
 #----------------------------------------------------------  mi300 · engine  -----------------------------------------------------------#
 
-- label: COPY-C Engine # TBD
+- label: COPY B Engine # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -4242,7 +4947,7 @@ steps:
 
 #-----------------------------------------------------------  mi300 · evals  -----------------------------------------------------------#
 
-- label: COPY-C LM Eval Large Models (4xH100-4xMI300) # TBD
+- label: COPY B LM Eval Large Models (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_4
@@ -4252,19 +4957,9 @@ steps:
   - export VLLM_USE_DEEP_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
 
-- label: COPY-C ROCm LM Eval Large Models (8 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_8
-  num_gpus: 8
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
-
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
-- label: COPY-C Language Models Test (Extended Generation) # TBD
+- label: COPY B Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -4274,11 +4969,10 @@ steps:
   - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
-- label: COPY-C Language Models Tests (Hybrid) %N # TBD
+- label: COPY B Language Models Tests (Hybrid) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   commands:
@@ -4288,7 +4982,7 @@ steps:
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
 
-- label: COPY-C Multi-Modal Models (Extended Pooling) # TBD
+- label: COPY B Multi-Modal Models (Extended Pooling) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
@@ -4296,49 +4990,21 @@ steps:
   commands:
   - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
-- label: "COPY-C Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
+- label: "COPY B Multi-Modal Models (Standard) 2: qwen3 + gemma" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
-  torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
 
 #------------------------------------------------------------  mi300 · v1  -------------------------------------------------------------#
 
-- label: COPY-C V1 Spec Decode # TBD
+- label: COPY B V1 Spec Decode # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdshadow]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/tests"
   commands:
   - pytest -v -s -m 'not slow_test' v1/spec_decode
-
-#########################################################################################################################################
-#                                                                                                                                       #
-#                                                         MI300 (gfx942) tests                                                          #
-#                                                                                                                                       #
-#########################################################################################################################################
-
-#--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
-
-- label: COPY-C Distributed Quick Reduce Tests (2 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_2
-  num_gpus: 2
-  working_dir: "/vllm-workspace/"
-  commands:
-  - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
-  - pytest -v -s tests/distributed/test_quick_all_reduce.py
-
-- label: COPY-C Language Models Test (PPL) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdshadow]
-  agent_pool: mi300_1
-  working_dir: "/vllm-workspace/tests"
-  commands:
-  - pytest -v -s models/language/generation_ppl_test
