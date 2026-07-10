@@ -5211,3 +5211,78 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+# =============================================================================
+# Tests for Scheduler._update_requests_with_invalid_blocks (KV Load Failure Recovery)
+# =============================================================================
+
+def test_single_block_invalid_rewinds_correctly(self):
+    """A single invalid block should rewind to the block boundary."""
+    block_ids_map = {
+        "req-0": ([0, 1, 2],),
+    }
+    manager = Mock()
+    manager.get_block_ids.side_effect = lambda req_id: block_ids_map.get(req_id, ([],))
+    manager.evict_blocks = Mock()
+
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.kv_cache_manager = manager
+
+    # Request has 48 tokens (3 blocks of 16 tokens each)
+    requests = create_requests(num_requests=1, num_tokens=48, max_tokens=16)
+
+    # Block 1 (tokens 16-31) is invalid
+    invalid_block_ids = {1}
+    num_scheduled_tokens = {"req-0": 0}
+    result = Scheduler._update_requests_with_invalid_blocks(
+        scheduler,
+        requests,
+        invalid_block_ids,
+        num_scheduled_tokens,
+        evict_blocks=True,
+    )
+
+    affected, affected_tokens, blocks = result
+    assert "req-0" in affected
+    assert requests[0].num_computed_tokens == 16
+    assert affected_tokens == 32
+
+def test_multiple_groups_different_block_sizes(self):
+    """Test handling of multiple KV cache groups with different block sizes."""
+    # Create config with 2 groups: block_size=16 and block_size=8
+    config = Mock()
+    group0 = Mock()
+    group0.kv_cache_spec.block_size = 16
+    group1 = Mock()
+    group1.kv_cache_spec.block_size = 8
+    config.kv_cache_groups = [group0, group1]
+
+    block_ids_map = {
+        "req-0": ([0, 1],[10, 11, 12, 13]),
+    }
+    manager = Mock()
+    manager.get_block_ids.side_effect = lambda req_id: block_ids_map.get(req_id, ([],))
+    manager.evict_blocks = Mock()
+
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    scheduler.kv_cache_manager = manager
+    scheduler.kv_cache_config = config
+
+    # Request has 32 computed tokens
+    requests = create_requests(num_requests=1, num_tokens=32, max_tokens=16)
+
+    # Only block 13 in group1 is invalid (covers tokens 24-32)
+    invalid_block_ids = {13}
+    num_scheduled_tokens = {"req-0": 0}
+    result = Scheduler._update_requests_with_invalid_blocks(
+        scheduler,
+        requests,
+        invalid_block_ids,
+        num_scheduled_tokens,
+        evict_blocks=True,
+    )
+
+    affected, affected_tokens, _blocks = result
+    # block 1 should aslo be marked as failed
+    assert requests[0].num_computed_tokens == 16
+    assert affected_tokens == 16

@@ -341,6 +341,36 @@ def _log_mooncake_load_tier_summary(
         bytes_by_tier,
     )
 
+def _collect_peer_block_ids(
+    token_start: int,
+    req_meta: ReqMeta,
+    token_databases: list[ChunkedTokenDatabase],
+) -> set[int]:
+    """
+    Collect the peer block_ids in other groups that cover the same token span as the given block.
+
+    In the hybrid model, KV for the same token span is sharded across multiple groups.
+    If one group’s block fails to load, the KV in its peer blocks of other groups is also invalid
+    and must be marked as failed together.
+
+    Args:
+        token_start: starting token position covered by the current block
+        req_meta: request metadata (contains block_ids for each group)
+        token_databases: ChunkedTokenDatabase instance for each group
+    Returns:
+        set of peer block_ids
+    """
+    peer_block_ids: set[int] = set()
+    for peer_g_idx, peer_db in enumerate(token_databases):
+        peer_block_size = peer_db.block_size
+        peer_chunk_idx = token_start // peer_block_size
+        peer_block_ids_list = req_meta.block_ids[peer_g_idx]
+        if peer_chunk_idx < len(peer_block_ids_list):
+            peer_bid = peer_block_ids_list[peer_chunk_idx]
+            # A block_id ≤ 0 denotes an empty block in mamba-align mode (not actually allocated)
+            if peer_bid > 0:
+                peer_block_ids.add(peer_bid)
+    return peer_block_ids
 
 # ============================================================
 # Transfer Threads
@@ -775,9 +805,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         )
         self.coord = coord
 
-    def _add_load_error_block_ids(self, block_ids: list[int]) -> None:
+    def _add_load_error_block_ids(self, block_ids: list[int] | list[set[int]]) -> None:
         with self._invalid_block_ids_lock:
-            self._invalid_block_ids.update(block_ids)
+            for item in block_ids:
+                if isinstance(item, set):
+                    self._invalid_block_ids.update(item)
+                else:
+                    self._invalid_block_ids.add(item)
 
     def get_and_clear_block_ids_with_load_errors(self) -> set[int]:
         with self._invalid_block_ids_lock:
@@ -801,7 +835,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list: list[list[int]] = []
         size_list: list[list[int]] = []
         key_list: list[str] = []
-        block_id_list: list[int] = []
+        block_id_list: list[set[int]] = []
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
             for start, end, block_hash in db.process_tokens(
@@ -816,8 +850,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 key_list.append(db.key_for(block_hash))
                 addr_list.append(addr)
                 size_list.append(size)
-                block_id_list.append(block_id)
-
+                peer_ids = _collect_peer_block_ids(
+                    start, req_meta, self.token_databases
+                )
+                block_id_list.append({block_id} | peer_ids)
         # Rotate aligned lists by tp_rank for load balancing.
         rotation = self.tp_rank % len(key_list)
         key_list_c = _rotate_list(key_list, rotation)
@@ -872,7 +908,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     block_id_offset = next_block_id_offset
 
         current_batch_keys: list[str] = key_list_c
-        current_batch_block_ids: list[int] = block_id_list_c
+        current_batch_block_ids: list[set[int]] = block_id_list_c
         batch_bytes = 0
         try:
             for batch_keys, batch_addrs, batch_sizes, batch_block_ids in load_batches:
