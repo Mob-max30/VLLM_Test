@@ -30,7 +30,7 @@ pytestmark = pytest.mark.skipif(
 
 MB = 1024 * 1024
 WORLD_SIZE = 2
-QUANT_LEVELS = ["FP", "INT8", "INT6", "INT4"]
+QUANT_LEVELS = ["FP", "INT8", "INT6", "INT4", "INT3"]
 
 
 def _log(message: str) -> None:
@@ -519,7 +519,14 @@ def test_quick_reduce_regime_values():
 def test_quick_reduce_regime_names():
     from vllm.distributed.device_communicators.quick_all_reduce import QuickReduceRegime
 
-    assert set(QuickReduceRegime.__members__) == {"FP", "INT8", "INT6", "INT4", "INT3", "NONE"}
+    assert set(QuickReduceRegime.__members__) == {
+        "FP",
+        "INT8",
+        "INT6",
+        "INT4",
+        "INT3",
+        "NONE",
+    }
 
 
 @pytest.mark.parametrize("quant_level", QUANT_LEVELS + ["NONE"])
