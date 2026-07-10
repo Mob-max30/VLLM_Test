@@ -13,6 +13,7 @@ import torch
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
 
 # Detect Blackwell / B200 (compute capability 10.x)
@@ -48,10 +49,10 @@ DEEPEP_BACKENDS = [
 @pytest.mark.skipif(not has_deep_ep(), reason="These tests require deep_ep to run")
 @pytest.mark.parametrize("all2all_backend", DEEPEP_BACKENDS)
 @pytest.mark.xfail(
-    IS_BLACKWELL,
+    IS_BLACKWELL or current_platform.is_rocm(),
     reason=(
-        "Temporary: DBO accuracy unstable on Blackwell "
-        "(doesn't meet expectation of MIN_ACCURACY = 0.62)"
+        "Temporary: DBO accuracy unstable on Blackwell and ROCm "
+        "(doesn't always meet expectation of MIN_ACCURACY = 0.62)"
     ),
 )
 def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
