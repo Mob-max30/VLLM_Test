@@ -16,6 +16,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       timeout_in_minutes: 95
       depends_on:
       - image-build-amd

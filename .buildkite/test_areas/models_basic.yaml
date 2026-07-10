@@ -43,6 +43,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       depends_on:
       - image-build-amd
 

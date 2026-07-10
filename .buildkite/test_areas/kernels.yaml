@@ -79,6 +79,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd
@@ -117,6 +118,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization
@@ -147,6 +149,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       timeout_in_minutes: 65
       source_file_dependencies:
       - csrc/quantization/cutlass_w8a8/moe/

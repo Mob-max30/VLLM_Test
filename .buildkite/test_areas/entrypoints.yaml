@@ -29,6 +29,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       # TODO(akaratza): Test after Torch >= 2.12 bump
       soft_fail: true
       depends_on:
@@ -51,6 +52,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       depends_on:
       - image-build-amd
 
@@ -68,6 +70,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -87,6 +90,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       timeout_in_minutes: 80
       depends_on:
       - image-build-amd
@@ -109,6 +113,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -170,6 +175,7 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      native_ci: true
       depends_on:
       - image-build-amd
       source_file_dependencies:
