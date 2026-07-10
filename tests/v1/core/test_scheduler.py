@@ -5283,6 +5283,6 @@ def test_multiple_groups_different_block_sizes(self):
     )
 
     affected, affected_tokens, _blocks = result
-    # block 1 should aslo be marked as failed
+    # block 1 should also be marked as failed
     assert requests[0].num_computed_tokens == 16
     assert affected_tokens == 16
