@@ -1933,7 +1933,15 @@ class NixlBaseConnectorWorker:
             indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
             for _, cache_or_caches in self.device_kv_caches.items():
-                cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+                if isinstance(cache_or_caches, (list, tuple)):
+                    # Backends that expose multiple views per layer (e.g.
+                    # Ascend's compressed MLA with separate K and scale
+                    # views) must post-process every view.
+                    cache_list = list(cache_or_caches)
+                elif split_k_and_v:
+                    cache_list = cache_or_caches
+                else:
+                    cache_list = [cache_or_caches]
                 for cache in cache_list:
                     if self.enable_permute_local_kv and block_size_ratio > 1:
                         kv_postprocess_blksize_and_layout_on_receive(
