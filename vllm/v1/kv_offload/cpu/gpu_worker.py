@@ -120,6 +120,35 @@ def compute_sub_block_ptrs(
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
 
 
+def _ref_copy_expansion(
+    ref: CanonicalKVCacheRef, gpu_to_cpu: bool, num_slots: int, slot: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-sub-block (src_offsets, dst_offsets, sizes) for one data ref under
+    the canonical fragment-major CPU layout: fragment f of this worker lands
+    at (f * num_slots + slot) * fragment_size within its region area."""
+    if ref.head_regions is None:
+        gpu_offs = [0]
+        cpu_offs = [slot * ref.page_size_bytes]
+        sizes = [ref.page_size_bytes]
+    else:
+        gpu_offs, cpu_offs, sizes = [], [], []
+        area_off = 0
+        for region in ref.head_regions:
+            for f in range(region.num_fragments):
+                gpu_offs.append(region.offset + f * region.fragment_size)
+                cpu_offs.append(
+                    area_off + (f * num_slots + slot) * region.fragment_size
+                )
+                sizes.append(region.fragment_size)
+            area_off += num_slots * region.num_fragments * region.fragment_size
+    src, dst = (gpu_offs, cpu_offs) if gpu_to_cpu else (cpu_offs, gpu_offs)
+    return (
+        np.asarray(src, dtype=np.uint64),
+        np.asarray(dst, dtype=np.uint64),
+        np.asarray(sizes, dtype=np.int64),
+    )
+
+
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
     if not current_platform.is_cuda_alike():
@@ -179,6 +208,9 @@ class SingleDirectionOffloadingHandler:
         kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
         mmap_region: SharedOffloadRegion | None = None,
+        canonical_layout: bool = False,
+        num_slots: int = 1,
+        slot: int = 0,
     ):
         """
         Initialize a SingleDirectionOffloadingHandler.
@@ -205,7 +237,9 @@ class SingleDirectionOffloadingHandler:
             assert cpu_tensor.device.type == "cpu"
             _, gpu_page_size = gpu_tensor.shape
             _, cpu_page_size = cpu_tensor.shape
-            assert cpu_page_size == gpu_page_size * block_size_factor
+            assert cpu_page_size == gpu_page_size * block_size_factor * (
+                num_slots if canonical_layout else 1
+            )
 
         self.src_tensors: list[torch.Tensor] = (
             gpu_tensors if gpu_to_cpu else cpu_tensors
@@ -223,6 +257,19 @@ class SingleDirectionOffloadingHandler:
         # cpu_page_size = gpu_page_size * block_size_factor.
         self.src_block_size_factor = 1 if self.gpu_to_cpu else block_size_factor
         self.dst_block_size_factor = block_size_factor if self.gpu_to_cpu else 1
+
+        # Per (group, ref) static copy-op expansions for the canonical layout
+        self._ref_expansions: list[list[tuple]] | None = (
+            [
+                [
+                    _ref_copy_expansion(ref, gpu_to_cpu, num_slots, slot)
+                    for ref in group_refs
+                ]
+                for group_refs in kv_cache_groups_data_refs
+            ]
+            if canonical_layout
+            else None
+        )
 
         # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
         self._mmap_region = mmap_region
@@ -281,10 +328,15 @@ class SingleDirectionOffloadingHandler:
         assert len(block_indices) == len(self.kv_cache_groups_data_refs)
 
         num_copy_ops = 0
-        for group_size, group_data_refs in zip(
-            group_sizes, self.kv_cache_groups_data_refs
+        for g_idx, (group_size, group_data_refs) in enumerate(
+            zip(group_sizes, self.kv_cache_groups_data_refs)
         ):
-            num_copy_ops += group_size * len(group_data_refs)
+            if self._ref_expansions is None:
+                num_copy_ops += group_size * len(group_data_refs)
+            else:
+                num_copy_ops += group_size * sum(
+                    len(sizes) for _, _, sizes in self._ref_expansions[g_idx]
+                )
 
         # reuse a pooled buffer set, growing it if this transfer needs more room
         batch_src, batch_dst, batch_sizes = (
@@ -307,8 +359,8 @@ class SingleDirectionOffloadingHandler:
         op_idx = 0
         # count total number of bytes copied
         num_transfer_bytes = 0
-        for group_size, block_idx, group_data_refs in zip(
-            group_sizes, block_indices, self.kv_cache_groups_data_refs
+        for g_idx, (group_size, block_idx, group_data_refs) in enumerate(
+            zip(group_sizes, block_indices, self.kv_cache_groups_data_refs)
         ):
             if group_size == 0:
                 continue
@@ -333,27 +385,54 @@ class SingleDirectionOffloadingHandler:
             group_src = src_blocks[src_offset:src_end_offset]
             group_dst = dst_blocks[dst_offset:dst_end_offset]
 
-            for data_ref in group_data_refs:
+            for r_idx, data_ref in enumerate(group_data_refs):
                 t_idx = data_ref.tensor_idx
-                end_idx = op_idx + group_size
 
+                if self._ref_expansions is None:
+                    end_idx = op_idx + group_size
+
+                    compute_sub_block_ptrs(
+                        group_src,
+                        self.src_block_size_factor,
+                        all_src[op_idx:end_idx],
+                        self.src_tensors[t_idx],
+                        skip_count=src_logical_blocks_to_skip,
+                    )
+                    compute_sub_block_ptrs(
+                        group_dst,
+                        self.dst_block_size_factor,
+                        all_dst[op_idx:end_idx],
+                        self.dst_tensors[t_idx],
+                        skip_count=dst_logical_blocks_to_skip,
+                    )
+
+                    all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
+                    num_transfer_bytes += group_size * data_ref.page_size_bytes
+                    op_idx = end_idx
+                    continue
+
+                src_off, dst_off, frag_sizes = self._ref_expansions[g_idx][r_idx]
+                src_base = np.empty(group_size, dtype=np.uint64)
+                dst_base = np.empty(group_size, dtype=np.uint64)
                 compute_sub_block_ptrs(
                     group_src,
                     self.src_block_size_factor,
-                    all_src[op_idx:end_idx],
+                    src_base,
                     self.src_tensors[t_idx],
                     skip_count=src_logical_blocks_to_skip,
                 )
                 compute_sub_block_ptrs(
                     group_dst,
                     self.dst_block_size_factor,
-                    all_dst[op_idx:end_idx],
+                    dst_base,
                     self.dst_tensors[t_idx],
                     skip_count=dst_logical_blocks_to_skip,
                 )
-
-                all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
-                num_transfer_bytes += group_size * data_ref.page_size_bytes
+                end_idx = op_idx + group_size * len(frag_sizes)
+                all_src[op_idx:end_idx] = (src_base[:, None] + src_off[None, :]).ravel()
+                all_dst[op_idx:end_idx] = (dst_base[:, None] + dst_off[None, :]).ravel()
+                all_sizes[op_idx:end_idx] = np.tile(frag_sizes, group_size)
+                num_transfer_bytes += group_size * int(frag_sizes.sum())
                 op_idx = end_idx
 
             src_offset = src_end_offset
@@ -479,7 +558,10 @@ class CPUOffloadingWorker(OffloadingWorker):
         block_size_factor: int,
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
+        canonical_layout: bool = False,
+        num_slots: int = 1,
     ):
+        assert not canonical_layout or mmap_region is not None
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
@@ -495,7 +577,11 @@ class CPUOffloadingWorker(OffloadingWorker):
             cpu_page_size_bytes = gpu_page_size_bytes * block_size_factor
 
             if mmap_region is not None:
-                cpu_tensor = mmap_region.create_next_view(cpu_page_size_bytes)
+                cpu_tensor = (
+                    mmap_region.create_next_shared_view(cpu_page_size_bytes * num_slots)
+                    if canonical_layout
+                    else mmap_region.create_next_view(cpu_page_size_bytes)
+                )
             else:
                 t0 = time.monotonic()
                 cpu_tensor = torch.zeros(
@@ -515,6 +601,11 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
 
+        slot = 0
+        if canonical_layout:
+            assert mmap_region is not None and mmap_region.rank is not None
+            slot = mmap_region.rank
+
         self._store_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
@@ -522,6 +613,9 @@ class CPUOffloadingWorker(OffloadingWorker):
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=True,
             mmap_region=mmap_region,
+            canonical_layout=canonical_layout,
+            num_slots=num_slots,
+            slot=slot,
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
@@ -530,6 +624,9 @@ class CPUOffloadingWorker(OffloadingWorker):
             block_size_factor=block_size_factor,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
+            canonical_layout=canonical_layout,
+            num_slots=num_slots,
+            slot=slot,
         )
 
     def submit_store(
