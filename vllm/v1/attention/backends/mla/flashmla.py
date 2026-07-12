@@ -282,6 +282,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         num_decodes = attn_metadata.num_decodes
         q = reshape_query_for_spec_decode(q, num_decodes)
+        seq_len = q.shape[1]
+        q_num_heads = q.shape[2]
 
         scheduler_metadata = attn_metadata.decode.scheduler_metadata
         if envs.VLLM_BATCH_INVARIANT and not is_quantized_kv_cache(self.kv_cache_dtype):
@@ -342,5 +344,14 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             )
 
         o = reshape_attn_output_for_spec_decode(o)
+
+        # FlashMLA returns LSE as [batch, heads, seq_len]; the DCP reducer
+        # consumes [tokens, heads]. Flattening matters under spec-decode, where
+        # seq_len > 1.
+        lse = (
+            lse.permute(0, 2, 1)
+            .reshape(num_decodes * seq_len, q_num_heads)
+            .contiguous()
+        )
 
         return o, lse
