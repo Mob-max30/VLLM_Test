@@ -29,6 +29,9 @@ class LayerReloadingInfo:
     # kernel formatted tensors, copied into by `_layerwise_process` when reloading
     kernel_tensors: LayerTensors | None = None
 
+    # checkpoint-layout views are bound directly to kernel storage while reloading
+    runtime_bound: bool = False
+
     def reset(self):
         self.__init__(  # type: ignore[misc]
             restore_metadata=self.restore_metadata, restore_device=self.restore_device
