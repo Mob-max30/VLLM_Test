@@ -17,16 +17,38 @@ if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-from vllm.distributed.weight_transfer.base import WeightTransferInitInfo
+from vllm.distributed.weight_transfer.base import (
+    TrainerInitInfo,
+    WeightTransferInitInfo,
+)
 
 
 @dataclass
 class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
-    """Initialization info for NCCL-based weight transfer backends."""
+    """Worker-side initialization info for NCCL weight transfer backends.
+
+    Carries everything an inference worker needs to dial in to the trainer's
+    rendezvous, including `rank_offset` (the workers sit after the trainer
+    rank in the process group).
+    """
 
     master_address: str
     master_port: int
     rank_offset: int
+    world_size: int
+
+
+@dataclass
+class NCCLTrainerInitInfo(TrainerInitInfo):
+    """Trainer-side initialization info for NCCL weight transfer backends.
+
+    The sender opens its endpoint as NCCL rank 0, so it needs no `rank_offset`.
+    `world_size` is the full trainer+worker NCCL group size. `rank` (from
+    `TrainerInitInfo`) identifies this trainer process; rank 0 is the sender.
+    """
+
+    master_address: str
+    master_port: int
     world_size: int
 
 
@@ -83,7 +105,7 @@ def worker_init_process_group(
 
 
 def trainer_init(
-    init_info: NCCLWeightTransferInitInfo | dict,
+    init_info: NCCLTrainerInitInfo | NCCLWeightTransferInitInfo | dict,
 ) -> "PyNcclCommunicator":
     """
     Initialize NCCL process group for trainer-side weight transfer.
@@ -92,7 +114,8 @@ def trainer_init(
     CUDA device (torch.accelerator.current_device_index()).
 
     Args:
-        init_info: Either an NCCLWeightTransferInitInfo object or a dict with keys:
+        init_info: An NCCLTrainerInitInfo / NCCLWeightTransferInitInfo object,
+            or a dict with keys:
             - master_address: str
             - master_port: int
             - world_size: int
