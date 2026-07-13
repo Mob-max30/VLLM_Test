@@ -295,6 +295,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     # Base threshold: query_len <= 1 is decode
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    supports_fused_decode_graph = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
