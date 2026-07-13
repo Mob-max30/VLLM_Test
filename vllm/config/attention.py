@@ -17,7 +17,16 @@ class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 
     backend: AttentionBackendEnum | None = None
-    """Attention backend to use. Use "auto" or None for automatic selection."""
+    """Attention backend to use. Use "auto" or None for automatic selection.
+    This is the decode backend: it serves every batch by default and is the one
+    captured for full-CUDA-graph decode."""
+
+    prefill_backend: AttentionBackendEnum | None = None
+    """Attention backend for prefill-containing (prefill + mixed) batches. When
+    set, any batch with at least one prefill request is routed to this backend
+    instead of `backend` (pure-decode batches always use `backend`, the decode
+    backend). Must share `backend`'s KV cache layout. Use "auto" or None to
+    disable routing (single-backend)."""
 
     flash_attn_version: Literal[2, 3, 4] | None = None
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
@@ -101,6 +110,20 @@ class AttentionConfig:
 
         The special value "auto" is treated as None, which triggers
         automatic backend selection.
+        """
+        if isinstance(value, str):
+            if value.lower() == "auto":
+                return None
+            return AttentionBackendEnum[value.upper()]
+        return value
+
+    @field_validator("prefill_backend", mode="before")
+    @classmethod
+    def validate_prefill_backend_before(cls, value: Any) -> Any:
+        """Parse the `prefill_backend` enum from a string.
+
+        "auto" is treated as None (routing disabled); other strings parse into
+        `AttentionBackendEnum`.
         """
         if isinstance(value, str):
             if value.lower() == "auto":
