@@ -111,9 +111,13 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
         # Weight is [N_total, K] where N_total = groups * o_lora_rank.
         # Reshape to [groups, o_lora_rank, K] then transpose to [groups, K, N]
         # and make contiguous for BMM.
-        wo_a_weight = torch.reshape(
-            wo_a_raw_weight, (self.n_local_groups, self.o_lora_rank, hidden_dim)
-        ).transpose(1, 2).contiguous()
+        wo_a_weight = (
+            torch.reshape(
+                wo_a_raw_weight, (self.n_local_groups, self.o_lora_rank, hidden_dim)
+            )
+            .transpose(1, 2)
+            .contiguous()
+        )
 
         scale_attr = (
             "weight_scale_inv"
@@ -405,4 +409,3 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
                 block_dpe=0,
             )
             output[query_start:query_end] = out
-
