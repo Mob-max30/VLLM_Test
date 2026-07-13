@@ -319,7 +319,7 @@ class TieringOffloadingManager(OffloadingManager):
         # request explicitly opts in with lookup_scope="all".
         params = req_context.kv_transfer_params
         scope = params.get(LOOKUP_SCOPE_KEY) if params else None
-        if scope == LookupScope.PRIMARY.value:
+        if scope == LookupScope.CPU.value:
             return LookupResult.MISS
 
         any_retry = False
