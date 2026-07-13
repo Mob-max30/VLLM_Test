@@ -556,6 +556,30 @@ class Base(
             ):
                 per_layer_sliding_window = self.config.sliding_window
 
+            # Handle heterogeneous attention geometry across layers. In
+            # Gemma 4, full-attention layers use `global_head_dim` and
+            # `num_global_key_value_heads` instead of `head_dim` and
+            # `num_key_value_heads` (mirrors `Gemma4TextAttention.__init__`).
+            layer_head_size = head_size
+            layer_num_kv_heads = num_kv_heads
+            layer_types = getattr(text_config, "layer_types", None)
+            is_sliding = (
+                layer_types is not None and layer_types[i] == "sliding_attention"
+            )
+            if getattr(text_config, "global_head_dim", None):
+                layer_head_size = (
+                    text_config.head_dim if is_sliding else text_config.global_head_dim
+                )
+            if (
+                not is_sliding
+                and getattr(text_config, "attention_k_eq_v", False)
+                and getattr(text_config, "num_global_key_value_heads", None)
+            ):
+                tp_size = self.parallel_config.tensor_parallel_size
+                layer_num_kv_heads = max(
+                    1, text_config.num_global_key_value_heads // tp_size
+                )
+
             attn_cls = (
                 EncoderOnlyAttention
                 if attn_type == AttentionType.ENCODER_ONLY
@@ -563,11 +587,11 @@ class Base(
             )
             attention_instances[i] = attn_cls(
                 num_heads=num_heads,
-                head_size=head_size,
+                head_size=layer_head_size,
                 # NOTE: We use Llama scale as default, if it's set by
                 # Transformers, it's updated in vllm_attention_forward
-                scale=head_size**-0.5,
-                num_kv_heads=num_kv_heads,
+                scale=layer_head_size**-0.5,
+                num_kv_heads=layer_num_kv_heads,
                 cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 logits_soft_cap=logits_soft_cap,
