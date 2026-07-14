@@ -925,6 +925,36 @@ def _process_weights_cpu(
     )
 
 
+def _convert_awq_moe_qweight_to_gptq_layout(
+    qweight: torch.Tensor, pack_factor: int
+) -> torch.Tensor:
+    from vllm.model_executor.layers.quantization.auto_awq import (
+        _REVERSE_AWQ_PACK_ORDER,
+    )
+
+    device = qweight.device
+    reverse_order = torch.tensor(
+        _REVERSE_AWQ_PACK_ORDER, dtype=torch.long, device=device
+    )
+    bits = 32 // pack_factor
+    mask = (1 << bits) - 1
+    shifts = torch.arange(0, 32, bits, dtype=torch.int32, device=device)
+
+    num_experts, k, n_packed = qweight.shape
+    n = n_packed * pack_factor
+
+    # Unpack int32 -> individual nibbles, undo AWQ's nibble ordering.
+    unpacked = (qweight.unsqueeze(-1) >> shifts) & mask  # (E, K, N_packed, pack)
+    unpacked = unpacked[..., reverse_order]
+    unpacked = unpacked.reshape(num_experts, k, n)
+
+    # Repack along the input dim (K) using standard nibble order.
+    unpacked = unpacked.reshape(num_experts, k // pack_factor, pack_factor, n)
+    return (unpacked.to(torch.int32) << shifts[None, None, :, None]).sum(
+        dim=2, dtype=torch.int32
+    )
+
+
 def _process_weights_xpu(
     layer: torch.nn.Module,
     quant_config: QuantizationConfig,
@@ -965,13 +995,19 @@ def _process_weights_xpu(
     expects this convention; on a big-endian host the byte order reverses
     and the kernel would silently miscompute, so we hard-fail.
     """
-    del layer, quant_config  # unused — kept for parity with the marlin helper
+    del layer  # unused — kept for parity with the marlin helper
 
     if sys.byteorder != "little":
         raise NotImplementedError(
             "_process_weights_xpu requires a little-endian host: the GPTQ "
             "int32 → uint8 nibble repack relies on LE byte ordering."
         )
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+
+    if isinstance(quant_config, AutoAWQConfig):
+        pack_factor = quant_config.pack_factor
+        w13_qweight = _convert_awq_moe_qweight_to_gptq_layout(w13_qweight, pack_factor)
+        w2_qweight = _convert_awq_moe_qweight_to_gptq_layout(w2_qweight, pack_factor)
 
     w13_xpu = w13_qweight.transpose(1, 2).contiguous().view(torch.uint8)
     w2_xpu = w2_qweight.transpose(1, 2).contiguous().view(torch.uint8)
