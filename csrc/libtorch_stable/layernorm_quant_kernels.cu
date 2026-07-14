@@ -215,7 +215,9 @@ void rms_norm_static_fp8_quant(
   int num_tokens = input.numel() / hidden_size;
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
-  const int max_block_size = (num_tokens < 256) ? 1024 : 256;
+  const bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+  const int max_block_size =
+      batch_invariant_launch ? 1024 : ((num_tokens < 256) ? 1024 : 256);
   dim3 grid(num_tokens);
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
