@@ -3,6 +3,7 @@
 
 import inspect
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -70,6 +71,18 @@ class QuantizeMethodBase(ABC):
         This can be used for example, to transpose weights for computation.
         """
         return
+
+    def supports_direct_weight_reload(self, layer: nn.Module) -> bool:
+        """Whether checkpoint weights can reload into runtime tensors directly."""
+        return False
+
+    def bind_runtime_weight_reload(
+        self,
+        layer: nn.Module,
+        runtime_params: Mapping[str, nn.Parameter],
+    ) -> bool:
+        """Bind checkpoint-layout parameters to existing runtime storage."""
+        return False
 
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
