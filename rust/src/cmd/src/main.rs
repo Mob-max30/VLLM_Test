@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 mod cli;
 mod logging;
 
@@ -10,6 +13,9 @@ use tracing::{info, warn};
 use vllm_managed_engine::ManagedEngineHandle;
 
 use crate::cli::{Cli, Command};
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const TOKIO_WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
 const DEFAULT_MAX_TOKIO_WORKER_THREADS: usize = 32;

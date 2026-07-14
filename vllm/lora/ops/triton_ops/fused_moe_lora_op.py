@@ -7,8 +7,10 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import supports_pdl, supports_tma
@@ -406,7 +408,7 @@ def _run_fused_moe_lora_one_shot(
 
     # NPID_FACTOR heuristic: scale N-axis parallelism when base CTA count is
     # short of saturating the SM array. Cap by the cost of redundant shrink.
-    sm_count = torch.cuda.get_device_properties(device).multi_processor_count
+    sm_count = current_platform.num_compute_units(device.index)
     base_programs = max(M_blocks * num_slices * grid_lora_dim, 1)
     shrink_ratio = K / max(K + N_per_slice, 1)
     max_npid_by_budget = max(1, int(1.5 / max(shrink_ratio, 1e-3)) + 1)
@@ -431,6 +433,14 @@ def _run_fused_moe_lora_one_shot(
         block_n, nw, ns = 128, 8, 3
     else:
         block_n, nw, ns = 128, 4, 3
+
+    # Devices with max shmem size less than 68KB can't support 3-stage
+    # pipeline. Fall back to a 2-stage on such devices
+    if current_platform.is_cuda_alike():
+        max_shmem_bytes = 68 * 1024
+        if get_max_shared_memory_bytes(device.index) < max_shmem_bytes:
+            ns = min(ns, 2)
+
     # BLOCK_K choice: for hidden-sized K (≥256, i.e. the K=hidden_size
     # shrink input on w13) force BLOCK_K=128 -- the wider tile halves the
     # K-loop trip count and removes the scoreboard stalls that dominated
@@ -786,7 +796,7 @@ def _run_fused_moe_lora_small_batch(
     N_tiles = triton.cdiv(N_per_slice, BLOCK_N)
     pair_slices = M_grid * num_slices
 
-    sm_count = torch.cuda.get_device_properties(device).multi_processor_count
+    sm_count = current_platform.num_compute_units(device.index)
     n_tiles_per_program = _pick_small_batch_chunk(pair_slices, N_tiles, sm_count)
     n_chunks = triton.cdiv(N_tiles, n_tiles_per_program)
     work_total = pair_slices * n_chunks

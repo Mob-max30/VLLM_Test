@@ -81,7 +81,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         stat_loggers: list[StatLoggerFactory] | None = None,
         aggregate_engine_logging: bool = False,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> None:
@@ -209,7 +209,7 @@ class AsyncLLM(EngineClient):
         enable_log_requests: bool = False,
         aggregate_engine_logging: bool = False,
         disable_log_stats: bool = False,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> "AsyncLLM":
@@ -1080,12 +1080,13 @@ class AsyncLLM(EngineClient):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+    async def start_weight_update(self) -> None:
         """Start a new weight update."""
-        await self.collective_rpc(
-            "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
-        )
+        await self.collective_rpc("start_weight_update")
+
+    async def start_draft_weight_update(self) -> None:
+        """Start a new weight update targeting the speculative draft model."""
+        await self.collective_rpc("start_draft_weight_update")
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
