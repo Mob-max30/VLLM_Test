@@ -2020,6 +2020,49 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
         _EPLB.prepare_communication_buffer_for_model(model)
 
 
+def _checkpoint_device_communicators(method_name: str) -> None:
+    seen = set()
+    for group in (_WORLD, _TP, _DCP, _PCP, _PP, _DP, _EP, _EPLB):
+        if group is None or id(group) in seen:
+            continue
+        seen.add(id(group))
+        if group.device_communicator is not None:
+            getattr(group.device_communicator, method_name)()
+
+
+def checkpoint_prepare_distributed_state() -> None:
+    """Prepare FlashInfer communication state for a process checkpoint.
+
+    Device communicators prepare before global all-reduce workspaces. A future
+    NCCL checkpoint layer can prepare after this function returns. This
+    transition must not be composed with communicator memory suspension.
+    """
+    from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+        checkpoint_prepare_fi_ar_workspaces,
+    )
+
+    torch.accelerator.synchronize()
+    _checkpoint_device_communicators("checkpoint_prepare")
+    checkpoint_prepare_fi_ar_workspaces()
+    torch.accelerator.synchronize()
+
+
+def checkpoint_restore_distributed_state() -> None:
+    """Restore FlashInfer communication state after a process checkpoint.
+
+    Global all-reduce workspaces restore before device communicators. A future
+    NCCL checkpoint layer can restore before this function is called.
+    """
+    from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+        checkpoint_restore_fi_ar_workspaces,
+    )
+
+    torch.accelerator.synchronize()
+    checkpoint_restore_fi_ar_workspaces()
+    _checkpoint_device_communicators("checkpoint_restore")
+    torch.accelerator.synchronize()
+
+
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return _TP is not None and _PP is not None

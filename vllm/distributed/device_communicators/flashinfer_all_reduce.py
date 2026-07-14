@@ -39,6 +39,7 @@ _fi_ar_workspace = None
 # allreduce backend or a fallback backend when the primary workspace is not
 # available on the current topology.
 _fi_ar_quant_workspace = None
+_fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
 
 
 def _create_workspace(
@@ -81,6 +82,14 @@ def _create_workspace(
         return None
     finally:
         random.setstate(rng_state)
+    workspace_id = id(workspace)
+    retained_group = _fi_ar_workspace_groups.get(workspace_id)
+    if retained_group is not None and retained_group is not group:
+        raise RuntimeError(
+            "FlashInfer returned an all-reduce workspace already associated "
+            "with a different process group"
+        )
+    _fi_ar_workspace_groups[workspace_id] = group
     logger.debug(
         "Initialized FlashInfer All Reduce workspace: backend=%s, "
         "world_size=%d, rank=%d, max_token_num=%d, hidden_dim=%d, dtype=%s",
@@ -268,6 +277,40 @@ def destroy_fi_ar_workspace():
             _fi_ar_quant_workspace.destroy()
 
         _fi_ar_workspace = _fi_ar_quant_workspace = None
+        _fi_ar_workspace_groups.clear()
+
+
+def _fi_ar_workspaces():
+    seen = set()
+    for workspace in (_fi_ar_workspace, _fi_ar_quant_workspace):
+        if workspace is not None and id(workspace) not in seen:
+            seen.add(id(workspace))
+            yield workspace
+
+
+def _fi_ar_checkpoint_workspaces(method_name: str):
+    checkpoint_workspaces = []
+    for workspace in _fi_ar_workspaces():
+        group = _fi_ar_workspace_groups.get(id(workspace))
+        if group is None:
+            raise RuntimeError(
+                "FlashInfer all-reduce workspace process group was not retained"
+            )
+        method = getattr(workspace, method_name, None)
+        if not callable(method):
+            raise NotImplementedError("Checkpointing not supported")
+        checkpoint_workspaces.append((method, group))
+    return checkpoint_workspaces
+
+
+def checkpoint_prepare_fi_ar_workspaces() -> None:
+    for checkpoint_prepare, _ in _fi_ar_checkpoint_workspaces("checkpoint_prepare"):
+        checkpoint_prepare()
+
+
+def checkpoint_restore_fi_ar_workspaces() -> None:
+    for checkpoint_restore, group in _fi_ar_checkpoint_workspaces("checkpoint_restore"):
+        checkpoint_restore(TorchDistBackend(group=group))
 
 
 atexit.register(destroy_fi_ar_workspace)
