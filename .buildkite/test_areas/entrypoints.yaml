@@ -28,7 +28,8 @@ steps:
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
+      native_ci: true
       # TODO(akaratza): Test after Torch >= 2.12 bump
       soft_fail: true
       depends_on:
@@ -50,7 +51,8 @@ steps:
   - pytest -v -s entrypoints/scale_out
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
+      native_ci: true
       depends_on:
       - image-build-amd
 
@@ -67,7 +69,8 @@ steps:
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
+      native_ci: true
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -86,7 +89,8 @@ steps:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
+      native_ci: true
       timeout_in_minutes: 80
       depends_on:
       - image-build-amd
@@ -108,7 +112,8 @@ steps:
   - pytest -v -s entrypoints/anthropic
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
+      native_ci: true
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -169,7 +174,8 @@ steps:
   - pytest -s entrypoints/openai/correctness/
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
+      native_ci: true
       depends_on:
       - image-build-amd
       source_file_dependencies:

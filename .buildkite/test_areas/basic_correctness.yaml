@@ -18,7 +18,8 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
+      native_ci: true
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
