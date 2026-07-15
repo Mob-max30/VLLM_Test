@@ -529,7 +529,20 @@ class Gemma4MTP(nn.Module):
 
         draft_cfg = vllm_config.speculative_config.draft_model_config
         gen_cfg = draft_cfg.try_get_generation_config()
-        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        self.register_buffer(
+            "_suppress_token_ids",
+            (
+                torch.tensor(
+                    suppress_token_ids,
+                    dtype=torch.long,
+                    device=vllm_config.device_config.device,
+                )
+                if suppress_token_ids
+                else None
+            ),
+            persistent=False,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -581,8 +594,8 @@ class Gemma4MTP(nn.Module):
             )
         else:
             logits = self.logits_processor(self.lm_head, hidden_states)
-        if logits is not None and self._suppress_token_ids:
-            logits[:, self._suppress_token_ids] = -float("inf")
+        if logits is not None and self._suppress_token_ids is not None:
+            logits.index_fill_(1, self._suppress_token_ids, -float("inf"))
         return logits
 
     def get_top_tokens(
