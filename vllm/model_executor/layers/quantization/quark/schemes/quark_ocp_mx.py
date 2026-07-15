@@ -122,9 +122,9 @@ try:
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return torch.empty(
             (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
@@ -202,19 +202,9 @@ class QuarkOCP_MX(QuarkScheme):
                 "implemented. Please open an issue."
             )
 
-        # TODO(rocm-quark): Re-enable the native ROCm w_mxfp4_a_mxfp4
-        # dynamic GEMM path once its numerical corruption is fixed.
-        self.force_rocm_mxfp4_emulation = (
-            current_platform.is_rocm()
-            and self.input_dtype == "mxfp4"
-            and self.weight_dtype == "mxfp4"
-        )
-
         # TODO: integrate (or test) mixed-precision kernel.
-        self.emulate = (
-            self.force_rocm_mxfp4_emulation
-            or not current_platform.supports_mx()
-            or (self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4")
+        self.emulate = not current_platform.supports_mx() or (
+            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
         self.rocm_use_aiter_fp4_asm_gemm = (
@@ -229,14 +219,7 @@ class QuarkOCP_MX(QuarkScheme):
                 "https://github.com/ROCm/aiter for installation details."
             )
 
-        if self.force_rocm_mxfp4_emulation:
-            logger.warning_once(
-                "ROCm native Quark OCP MX dynamic GEMM for w_mxfp4_a_mxfp4 "
-                "is temporarily disabled due to correctness issues. Falling "
-                "back to simulated weight dequantization and activation QDQ "
-                "with high-precision linear layers."
-            )
-        elif not current_platform.supports_mx():
+        if not current_platform.supports_mx():
             logger.warning_once(
                 "The current platform does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
