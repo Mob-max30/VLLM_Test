@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -73,7 +74,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self.intermediate_size_per_partition = (
             moe_config.intermediate_size_per_partition
         )
-        self.max_num_tokens = moe_config.max_num_tokens
+        self.max_num_tokens = fi_moe_largest_bucket(moe_config)
         self.local_expert_offset = self.ep_rank * self.num_local_experts
 
         activation = moe_config.activation
