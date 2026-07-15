@@ -346,6 +346,22 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.num_redundant_experts = self.language_model.num_redundant_experts
         self.set_eplb_state = self.language_model.set_eplb_state
 
+        gen_cfg = vllm_config.model_config.try_get_generation_config()
+        suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+        self.register_buffer(
+            "_suppress_token_ids",
+            (
+                torch.tensor(
+                    suppress_token_ids,
+                    dtype=torch.long,
+                    device=vllm_config.device_config.device,
+                )
+                if suppress_token_ids
+                else None
+            ),
+            persistent=False,
+        )
+
     # ------------------------------------------------------------------ #
     # Multimodal processing (encoder-free overrides)
     # ------------------------------------------------------------------ #
