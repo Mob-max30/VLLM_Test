@@ -148,6 +148,9 @@ steps:
   - vllm/envs.py
   - vllm/platforms/rocm.py
   commands:
+  - python -c "import torch; actual = torch.cuda.device_count(); assert actual == 1, f'Expected 1 visible GPU, found {actual}'"
+  - python -c "from importlib.metadata import version; from packaging.version import Version; actual = Version(version('amd-quark')); required = Version('0.12.0'); assert actual >= required, f'Expected amd-quark>={required}, found {actual}'"
+  - python -c "from vllm._aiter_ops import is_aiter_found_and_supported; from vllm.platforms.rocm import on_gfx950; assert on_gfx950(), 'Expected a GFX950 GPU'; assert is_aiter_found_and_supported(), 'Expected a supported AITER installation'"
   - pytest -v -s kernels/quantization/test_rocm_quark_ocp_mx.py
   - pytest -v -s kernels/moe/test_ocp_mx_moe.py -k 'rocm_mxfp4_moe_oracle and AITER_MXFP4_MXFP4'
 

@@ -602,7 +602,8 @@ class QuarkConfig(QuantizationConfig):
                 if _matches_pattern(layer_name, name_pattern):
                     return config
 
-            layer_type = cast(str, type(module))
+            # Quark serializes layer-type keys using ``type.__name__``.
+            layer_type = type(module).__name__
             layer_type_quant_config = cast(
                 dict[str, Any], self.quant_config.get("layer_type_quant_config")
             )

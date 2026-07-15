@@ -51,19 +51,63 @@ steps:
   commands:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
 
+- label: Quantized MoE Test (MI355)
+  key: quantized-moe-test-mi355
+  depends_on:
+  - image-build-amd
+  timeout_in_minutes: 180
+  device: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization/quark/
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/models/llama4.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/compressed_tensors/
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/triton_attn.py
+  - vllm/v1/attention/backends/rocm_attn.py
+  - vllm/v1/attention/backends/rocm_aiter_fa.py
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/selector.py
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  - vllm/model_executor/model_loader/
+  - tests/utils.py
+  - tests/quantization/test_gfx950_moe.py
+  - tests/quantization/test_quark.py
+  commands:
+  - python -c "import torch; actual = torch.cuda.device_count(); assert actual == 1, f'Expected 1 visible GPU, found {actual}'"
+  - python -c "from importlib.metadata import version; from packaging.version import Version; actual = Version(version('amd-quark')); required = Version('0.12.0'); assert actual >= required, f'Expected amd-quark>={required}, found {actual}'"
+  - python -c "from vllm._aiter_ops import is_aiter_found_and_supported; from vllm.platforms.rocm import on_gfx950; assert on_gfx950(), 'Expected a GFX950 GPU'; assert is_aiter_found_and_supported(), 'Expected a supported AITER installation'"
+  - pytest -s -v quantization/test_gfx950_moe.py
+
 - label: Quantization Quark Eval (2xMI355)
   key: quantized-quark-eval-2xmi355
   depends_on:
   - image-build-amd
   timeout_in_minutes: 180
   device: mi355_2
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization/
   - vllm/model_executor/layers/quantization/quark/
   - vllm/model_executor/layers/quantization/utils/
   - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/models/
   - vllm/model_executor/models/qwen2_moe.py
   - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/selector.py
+  - tests/quantization/
   - tests/quantization/reference_mxfp4.py
   - tests/quantization/test_quark.py
   - vllm/_aiter_ops.py
@@ -72,8 +116,41 @@ steps:
   # Keep ROCm defaults here; opt-in native W4A4 MoE is covered by the
   # rocm-quark-mxfp4-kernel-test-mi355 direct oracle.
   commands:
+  - python -c "import torch; actual = torch.cuda.device_count(); assert actual == 2, f'Expected 2 visible GPUs, found {actual}'"
+  - python -c "from importlib.metadata import version; from packaging.version import Version; actual = Version(version('amd-quark')); required = Version('0.12.0'); assert actual >= required, f'Expected amd-quark>={required}, found {actual}'"
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/test_quark.py -k "ocp_mx_wikitext_correctness and tp2"
+
+- label: Quantization Quark Eval (8xMI355)
+  key: quantized-quark-eval-8xmi355
+  depends_on:
+  - image-build-amd
+  timeout_in_minutes: 180
+  device: mi355_8
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/layers/quantization/quark/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/models/
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/selector.py
+  - tests/quantization/
+  - tests/quantization/test_quark.py
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  commands:
+  - python -c "import torch; actual = torch.cuda.device_count(); assert actual == 8, f'Expected 8 visible GPUs, found {actual}'"
+  - python -c "from importlib.metadata import version; from packaging.version import Version; actual = Version(version('amd-quark')); required = Version('0.12.0'); assert actual >= required, f'Expected amd-quark>={required}, found {actual}'"
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/test_quark.py::test_mxfp4_gsm8k_correctness
 
 - label: Quantized Models Test
   key: quantized-models-test

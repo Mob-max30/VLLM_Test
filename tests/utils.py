@@ -778,7 +778,9 @@ class RemoteOpenAIServer(RemoteVLLMServer):
         _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
-        print(f"Environment variables: {env}")
+        # Do not expose inherited credentials (for example HF_TOKEN) in test
+        # logs. The override names are sufficient to reproduce test behavior.
+        print(f"Environment variable overrides: {sorted(env_dict or {})}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,

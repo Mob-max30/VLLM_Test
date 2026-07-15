@@ -8,6 +8,7 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
 
 import importlib.metadata
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.util import find_spec
@@ -42,12 +43,22 @@ else:
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
-# Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
-QUARK_MXFP4_MIN_VERSION = "0.8.99"
+# Torch 2.11 requires the matching Quark compatibility release.
+_TORCH_RELEASE = version.parse(torch.__version__).release
+QUARK_MXFP4_MIN_VERSION = "0.12.0" if _TORCH_RELEASE[:2] >= (2, 11) else "0.8.99"
 
-QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
-    importlib.metadata.version("amd-quark")
-) >= version.parse(QUARK_MXFP4_MIN_VERSION)
+
+def _has_quark_mxfp4_support() -> bool:
+    if find_spec("quark") is None:
+        return False
+    try:
+        quark_version = version.parse(importlib.metadata.version("amd-quark"))
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return quark_version >= version.parse(QUARK_MXFP4_MIN_VERSION)
+
+
+QUARK_MXFP4_AVAILABLE = _has_quark_mxfp4_support()
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -67,6 +78,15 @@ def _has_hf_repo_access(repo_id: str) -> bool:
     ):
         return False
     return True
+
+
+def _require_hf_repo_access(repo_id: str) -> None:
+    if _has_hf_repo_access(repo_id):
+        return
+    message = f"Read access to {repo_id} is required for this test."
+    if os.getenv("CI") or os.getenv("BUILDKITE"):
+        pytest.fail(message)
+    pytest.skip(message)
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -279,7 +299,7 @@ WIKITEXT_ACCURACY_CONFIGS = [
 )
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     task = "wikitext"
-    rtol = 0.1
+    atol = 0.1
 
     # Smaller cudagraph_capture_sizes to speed up the test.
     results = lm_eval.simple_evaluate(
@@ -291,12 +311,13 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
         batch_size=64,
     )
 
-    EXPECTED_VALUE = config.excepted_value
+    expected_value = config.excepted_value
     measured_value = results["results"][task]["word_perplexity,none"]
-    assert (
-        measured_value < EXPECTED_VALUE + rtol
-        and measured_value > EXPECTED_VALUE - rtol
-    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+    print(
+        f"Expected: {expected_value} | Measured: {measured_value} | "
+        f"Absolute tolerance: {atol}"
+    )
+    assert measured_value == pytest.approx(expected_value, abs=atol, rel=0)
 
 
 @pytest.mark.skipif(
@@ -317,7 +338,7 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
     model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
     task = "wikitext"
 
-    rtol = 0.25
+    atol = 0.25
 
     config = AccuracyTestConfig(
         model_name=model_name,
@@ -340,12 +361,13 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
         batch_size=64,
     )
 
-    EXPECTED_VALUE = config.excepted_value
+    expected_value = config.excepted_value
     measured_value = results["results"][task]["word_perplexity,none"]
-    assert (
-        measured_value < EXPECTED_VALUE + rtol
-        and measured_value > EXPECTED_VALUE - rtol
-    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+    print(
+        f"Expected: {expected_value} | Measured: {measured_value} | "
+        f"Absolute tolerance: {atol}"
+    )
+    assert measured_value == pytest.approx(expected_value, abs=atol, rel=0)
 
 
 @pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
@@ -355,11 +377,10 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
 )
 def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
-    if not _has_hf_repo_access(config.model_name):
-        pytest.skip(f"Read access to {config.model_name} is required for this test.")
+    _require_hf_repo_access(config.model_name)
 
     task = "gsm8k"
-    rtol = 0.03
+    atol = 0.03
 
     results = lm_eval.simple_evaluate(
         model="vllm",
@@ -369,12 +390,13 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
         num_fewshot=8,
     )
 
-    EXPECTED_VALUE = config.excepted_value
+    expected_value = config.excepted_value
     measured_value = results["results"][task]["exact_match,strict-match"]
-    assert (
-        measured_value - rtol < EXPECTED_VALUE
-        and measured_value + rtol > EXPECTED_VALUE
-    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+    print(
+        f"Expected: {expected_value} | Measured: {measured_value} | "
+        f"Absolute tolerance: {atol}"
+    )
+    assert measured_value == pytest.approx(expected_value, abs=atol, rel=0)
 
 
 @pytest.mark.skipif(
