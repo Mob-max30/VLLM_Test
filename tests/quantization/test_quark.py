@@ -9,6 +9,7 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 
 import importlib.metadata
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib.util import find_spec
 
 import huggingface_hub
@@ -17,6 +18,7 @@ import pytest
 import torch
 from packaging import version
 
+from tests.utils import multi_gpu_marks, multi_gpu_only
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkLinearMethod,
     QuarkW8A8Fp8,
@@ -54,13 +56,17 @@ if QUARK_MXFP4_AVAILABLE:
     from quark.torch.kernel import mx as mx_kernel
     from quark.torch.quantization.config.config import FP4PerGroupSpec
 
-try:
-    huggingface_hub.list_repo_refs(
-        "amd/Llama-3.3-70B-Instruct-WMXFP4-AMXFP4-KVFP8-Scale-UINT8-SQ"
-    )
-    HF_HUB_AMD_ORG_ACCESS = True
-except huggingface_hub.errors.RepositoryNotFoundError:
-    HF_HUB_AMD_ORG_ACCESS = False
+
+@lru_cache
+def _has_hf_repo_access(repo_id: str) -> bool:
+    try:
+        huggingface_hub.list_repo_refs(repo_id)
+    except (
+        huggingface_hub.errors.HfHubHTTPError,
+        huggingface_hub.errors.RepositoryNotFoundError,
+    ):
+        return False
+    return True
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -69,6 +75,9 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+@pytest.mark.skipif(
+    not current_platform.supports_fp8(), reason="FP8 is not supported on this GPU"
+)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
@@ -99,6 +108,9 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.supports_fp8(), reason="FP8 is not supported on this GPU"
+)
 @pytest.mark.parametrize("tp", [1])
 def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
     model_path = "amd/Qwen2.5-1.5B-Instruct-ptpc-Quark-ts"
@@ -170,6 +182,9 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.supports_fp8(), reason="FP8 is not supported on this GPU"
+)
 def test_quark_fp8_parity(vllm_runner):
     quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
     fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
@@ -256,13 +271,13 @@ WIKITEXT_ACCURACY_CONFIGS = [
     [pytest.param(val, id=f"config:{val}") for val in WIKITEXT_ACCURACY_CONFIGS],
 )
 @pytest.mark.parametrize(
-    "tp_size", [pytest.param(val, id=f"tp_size:{val}") for val in [1, 2]]
+    "tp_size",
+    [
+        pytest.param(1, id="tp1"),
+        pytest.param(2, marks=multi_gpu_marks(num_gpus=2), id="tp2"),
+    ],
 )
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
-    device_count = torch.accelerator.device_count()
-    if device_count < tp_size:
-        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
-
     task = "wikitext"
     rtol = 0.1
 
@@ -288,12 +303,14 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     not QUARK_MXFP4_AVAILABLE,
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
 )
-@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize(
+    "tp_size",
+    [
+        pytest.param(1, id="tp1"),
+        pytest.param(2, marks=multi_gpu_marks(num_gpus=2), id="tp2"),
+    ],
+)
 def test_nvfp4_wikitext_correctness(tp_size: int):
-    device_count = torch.accelerator.device_count()
-    if device_count < tp_size:
-        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
-
     # NOTE: expected_value from nvidia/Qwen3-30B-A3B-NVFP4
     expected_value = 11.2391
 
@@ -332,18 +349,14 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
 
 
 @pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
+@multi_gpu_only(num_gpus=8)
 @pytest.mark.skipif(
     not QUARK_MXFP4_AVAILABLE,
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
 )
-@pytest.mark.skipif(
-    not HF_HUB_AMD_ORG_ACCESS,
-    reason="Read access to huggingface.co/amd is required for this test.",
-)
 def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
-    device_count = torch.accelerator.device_count()
-    if device_count < 8:
-        pytest.skip(f"This test requires >=8 gpus, got only {device_count}")
+    if not _has_hf_repo_access(config.model_name):
+        pytest.skip(f"Read access to {config.model_name} is required for this test.")
 
     task = "gsm8k"
     rtol = 0.03

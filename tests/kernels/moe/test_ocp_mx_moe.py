@@ -38,6 +38,7 @@ if ROCM_AVAILABLE:
     ROCM_GFX950 = on_gfx950()
 
     if ROCM_AITER_AVAILABLE:
+        from aiter.ops.quant import per_1x32_f4_quant
         from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
@@ -183,6 +184,19 @@ def mxfp8_dequantize(x, scale):
     return x_float * scale
 
 
+def aiter_roundup_mxfp4_quant_dequantize(x: torch.Tensor) -> torch.Tensor:
+    shape = x.shape
+    x_2d = x.to(torch.bfloat16).reshape(-1, shape[-1]).contiguous()
+    # AITER's W4A4 MoE path uses its per-1x32 RoundUp quantizer internally.
+    # TODO(aiter): Quark checkpoints declare Even activation scaling. Plumb
+    # the scale-rounding mode through AITER fused MoE, then use Even here.
+    x_quant, x_scale = per_1x32_f4_quant(x_2d)
+    x_dequant = upcast_from_mxfp(
+        x_quant.view(torch.uint8), x_scale.view(torch.uint8), torch.bfloat16, axis=-1
+    )
+    return x_dequant.reshape(shape).to(x.dtype)
+
+
 def reference_moe(
     roouting_logits,
     topk,
@@ -215,6 +229,8 @@ def reference_moe(
     expert_weights = torch.nn.functional.softmax(experts.values, dim=1)
     expert_indices = experts.indices
     t = hidden_states.clone()
+    if act_type == "mxfp4":
+        t = aiter_roundup_mxfp4_quant_dequantize(t)
     # MLP #1
     mlp1_weight = w13[expert_indices, ...]
     mlp1_bias = bias13[expert_indices, ...]
@@ -240,6 +256,10 @@ def reference_moe(
             t.to(torch.bfloat16), is_sf_swizzled_layout=False
         )
         t = mxfp8_dequantize(t_quantized, t_scale)
+    elif act_type == "mxfp4":
+        t = aiter_roundup_mxfp4_quant_dequantize(t)
+    elif act_type == "bf16_intermediate":
+        t = t.to(torch.bfloat16).to(torch.float32)
     # MLP #2
     mlp2_weight = w2[expert_indices, ...]
     mlp2_bias = bias2[expert_indices, ...]
@@ -1203,9 +1223,9 @@ ROCM_BACKEND_CONFIGS = {
         "requires_gfx950": False,
     },
     "AITER_MXFP4_BF16": {
-        "activation": "SILU",
-        "rtol": 1.0,
-        "percent": 0.7,
+        "activation": "SWIGLUOAI",
+        "rtol": 0.1,
+        "percent": 0.99,
         "requires_aiter": True,
         "requires_gfx950": True,
     },
@@ -1213,6 +1233,13 @@ ROCM_BACKEND_CONFIGS = {
         "activation": "SWIGLUOAI",
         "rtol": 0.5,
         "percent": 0.9,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+    },
+    "AITER_MXFP4_MXFP4": {
+        "activation": "SILU",
+        "rtol": 0.1,
+        "percent": 0.99,
         "requires_aiter": True,
         "requires_gfx950": True,
     },
@@ -1341,6 +1368,10 @@ def test_rocm_mxfp4_moe_oracle(
         num_experts, 2 * intermediate_size, dtype=dtype, device=device
     )
     w2_bias = torch.randn(num_experts, hidden_size, dtype=dtype, device=device)
+    if backend_name == "AITER_MXFP4_MXFP4":
+        # The W4A4 AITER kernel does not accept expert biases.
+        w13_bias.zero_()
+        w2_bias.zero_()
 
     # Create static input scales for W4A8 backend (AITER_MXFP4_FP8)
     w13_input_scale: torch.Tensor | None = None
@@ -1366,6 +1397,15 @@ def test_rocm_mxfp4_moe_oracle(
     layer.w2_weight_scale = w2_scale
     layer.w13_input_scale = w13_input_scale
     layer.w2_input_scale = w2_input_scale
+
+    # Conversion is in-place for several backends. Preserve checkpoint-layout
+    # tensors for the independent dequantized reference.
+    w13_quant_ref = w13_quant.clone()
+    w2_quant_ref = w2_quant.clone()
+    w13_scale_ref = w13_scale.clone()
+    w2_scale_ref = w2_scale.clone()
+    w13_bias_ref = w13_bias.clone()
+    w2_bias_ref = w2_bias.clone()
 
     # Convert weights using oracle
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
@@ -1453,10 +1493,13 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Dequantize weights for reference computation
     w13_dq = upcast_from_mxfp(
-        w13_quant.view(torch.uint8), w13_scale, torch.bfloat16, axis=-1
+        w13_quant_ref.view(torch.uint8),
+        w13_scale_ref,
+        torch.bfloat16,
+        axis=-1,
     )
     w2_dq = upcast_from_mxfp(
-        w2_quant.view(torch.uint8), w2_scale, torch.bfloat16, axis=-1
+        w2_quant_ref.view(torch.uint8), w2_scale_ref, torch.bfloat16, axis=-1
     )
 
     # Determine activation type and layout
@@ -1474,13 +1517,17 @@ def test_rocm_mxfp4_moe_oracle(
         num_experts,
         x.to(torch.float32),
         w13_dq.to(torch.float32),
-        w13_bias.to(torch.float32),
+        w13_bias_ref.to(torch.float32),
         w2_dq.to(torch.float32),
-        w2_bias.to(torch.float32),
+        w2_bias_ref.to(torch.float32),
         alpha=1.702 if activation == MoEActivation.SWIGLUOAI else 1.0,
         beta=1.0 if activation == MoEActivation.SWIGLUOAI else 0.0,
         limit=7.0 if activation == MoEActivation.SWIGLUOAI else None,
-        act_type="bf16",
+        act_type=(
+            "mxfp4"
+            if backend_name == "AITER_MXFP4_MXFP4"
+            else ("bf16_intermediate" if backend_name == "AITER_MXFP4_BF16" else "bf16")
+        ),
         activation=act_name,
         use_interleaved_layout=use_interleaved,
     )

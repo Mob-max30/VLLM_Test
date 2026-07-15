@@ -130,6 +130,27 @@ steps:
       depends_on:
       - image-build-amd
 
+- label: ROCm Quark MXFP4 Kernel Test (MI355)
+  key: rocm-quark-mxfp4-kernel-test-mi355
+  depends_on:
+  - image-build-amd
+  timeout_in_minutes: 30
+  device: mi355_1
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - tests/kernels/quantization/test_rocm_quark_ocp_mx.py
+  - tests/kernels/moe/test_ocp_mx_moe.py
+  - tests/kernels/moe/utils.py
+  - vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py
+  - vllm/model_executor/layers/quantization/utils/mxfp4_utils.py
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/_aiter_ops.py
+  - vllm/envs.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/quantization/test_rocm_quark_ocp_mx.py
+  - pytest -v -s kernels/moe/test_ocp_mx_moe.py -k 'rocm_mxfp4_moe_oracle and AITER_MXFP4_MXFP4'
+
 - label: Kernels MoE Test %N
   key: kernels-moe-test
   timeout_in_minutes: 50
