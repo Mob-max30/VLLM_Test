@@ -22,3 +22,9 @@ def test_fi_moe_largest_bucket_scales_data_parallel_capacity(
     config = SimpleNamespace(max_num_tokens=max_num_tokens, dp_size=dp_size)
 
     assert fi_moe_largest_bucket(config) == expected
+
+
+def test_fi_moe_largest_bucket_can_skip_tuning_floor():
+    config = SimpleNamespace(max_num_tokens=1024, dp_size=1)
+
+    assert fi_moe_largest_bucket(config, min_num_tokens=0) == 1024

@@ -74,7 +74,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self.intermediate_size_per_partition = (
             moe_config.intermediate_size_per_partition
         )
-        self.max_num_tokens = fi_moe_largest_bucket(moe_config)
+        self.max_num_tokens = fi_moe_largest_bucket(moe_config, min_num_tokens=0)
         self.local_expert_offset = self.ep_rank * self.num_local_experts
 
         activation = moe_config.activation
