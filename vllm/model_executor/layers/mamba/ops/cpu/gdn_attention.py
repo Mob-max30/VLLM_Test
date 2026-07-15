@@ -429,8 +429,7 @@ def _spec_forward(
             .to(torch.int32)
             .contiguous(),
         ).reshape_as(mixed_qkv_spec)
-
-    if not can_use_native_conv:
+   else:
         conv_out = torch.empty_like(mixed_qkv_spec)
         for i in range(num_spec_decodes):
             q_i = int(seq_lens[i].item())
