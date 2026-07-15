@@ -3,6 +3,7 @@
 import hashlib
 import importlib
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,10 +26,12 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    _group_hybrid_specs_by_type,
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
     get_kv_cache_capacity,
+    get_kv_cache_config_from_groups,
     get_kv_cache_configs,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
@@ -1995,6 +1998,85 @@ def test_group_and_unify_kv_cache_specs_mixed_page_size_groups():
     assert len(grouped) == 2
     layer_names = {name for g in grouped for name in g.kv_cache_specs}
     assert layer_names == {"mla.0", "mla.1", "swa.0"}
+
+
+def new_indexer_mla_spec(block_size=16):
+    # Sparse-attention indexer k_cache: an MLAAttentionSpec with a much smaller
+    # page size than the main MLA attention (uint8, small head), so the two
+    # can't share one block size.
+    return MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=132,
+        dtype=torch.uint8,
+    )
+
+
+def _alloc_config():
+    return SimpleNamespace(
+        kv_transfer_config=None,
+        cache_config=SimpleNamespace(num_gpu_blocks_override=None),
+    )
+
+
+def test_group_hybrid_specs_by_type_mla_with_attention_draft():
+    # An MLA target (main attn + sparse indexer, block_size 16) served with a
+    # non-MLA draft model's regular sliding-window attention (block_size 8): the
+    # MLA layers form one uniform-type group, the draft its own.
+    specs = {
+        "target.0.attn": new_mla_spec(),
+        "target.0.indexer": new_indexer_mla_spec(),
+        "target.1.attn": new_mla_spec(),
+        "draft.0": new_sliding_window_spec(block_size=8),
+    }
+    groups = _group_hybrid_specs_by_type(specs)
+    assert len(groups) == 2
+    assert all(isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in groups)
+    assert set(groups[0].layer_names) == {
+        "target.0.attn",
+        "target.0.indexer",
+        "target.1.attn",
+    }
+    assert set(groups[1].layer_names) == {"draft.0"}
+
+
+def test_get_kv_cache_config_from_groups_mla_draft_is_per_layer_contiguous():
+    # The MLA target (+ indexer) and non-MLA draft groups all have different
+    # page sizes. Each layer must get its own contiguous tensor (block_stride 0),
+    # not DeepseekV4's packed strided layout (which FLASHMLA_SPARSE can't read).
+    main, indexer = new_mla_spec(), new_indexer_mla_spec()
+    draft = new_sliding_window_spec(block_size=8)
+    mla_group = KVCacheGroupSpec(
+        ["target.0.attn", "target.0.indexer"],
+        UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs={"target.0.attn": main, "target.0.indexer": indexer},
+        ),
+    )
+    draft_group = KVCacheGroupSpec(
+        ["draft.0"],
+        UniformTypeKVCacheSpecs(block_size=8, kv_cache_specs={"draft.0": draft}),
+    )
+    bytes_per_block = (
+        main.page_size_bytes + indexer.page_size_bytes + draft.page_size_bytes
+    )
+    num_blocks = 32
+    config = get_kv_cache_config_from_groups(
+        _alloc_config(),
+        [mla_group, draft_group],
+        available_memory=bytes_per_block * num_blocks,
+    )
+
+    assert config.num_blocks == num_blocks
+    # Every tensor is contiguous (block_stride 0) and owned by a single layer.
+    assert all(t.block_stride == 0 for t in config.kv_cache_tensors)
+    assert all(len(t.shared_by) == 1 for t in config.kv_cache_tensors)
+    sizes = {t.shared_by[0]: t.size for t in config.kv_cache_tensors}
+    assert sizes == {
+        "target.0.attn": main.page_size_bytes * num_blocks,
+        "target.0.indexer": indexer.page_size_bytes * num_blocks,
+        "draft.0": draft.page_size_bytes * num_blocks,
+    }
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
