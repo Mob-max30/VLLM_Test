@@ -352,7 +352,7 @@ def compute_kv_seq_mask(
     # kv > q - sw; future kv passes trivially). Inert for full-attention layers
     # (SLIDING_WINDOW <= 0).
     if USE_MM_PREFIX:
-        for i in range(MAX_MM_RANGES):
+        for i in tl.range(MAX_MM_RANGES):
             range_start = tl.load(
                 mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
             )
