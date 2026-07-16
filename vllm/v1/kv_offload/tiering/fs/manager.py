@@ -34,6 +34,7 @@ from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     ReqContext,
@@ -100,6 +101,7 @@ class FileSystemTierManager(SecondaryTierManager):
     """
 
     medium: ClassVar[str] = MEDIUM_FS
+    filter_medium: ClassVar[Medium | None] = Medium.STORAGE
 
     def __init__(
         self,
@@ -177,6 +179,10 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        if self.filter_medium is not None and not req_context.load_tier_filter.allows(
+            self.filter_medium
+        ):
+            return LookupResult.MISS
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:
             return LookupResult.RETRY
