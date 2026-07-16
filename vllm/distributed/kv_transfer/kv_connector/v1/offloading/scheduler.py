@@ -36,7 +36,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
-    KV_LOAD_TIERS_KEY,
     GPULoadStoreSpec,
     LookupResult,
     OffloadingManager,
@@ -53,6 +52,8 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+KV_LOAD_TIERS_KEY = "kv_load_tiers"
 
 
 @dataclass(slots=True)
