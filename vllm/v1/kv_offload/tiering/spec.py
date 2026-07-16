@@ -205,9 +205,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
+        # Fragment-major canonical layout: slot order must equal TP-rank order
+        canonical_layout = (
+            bool(self.extra_config.get("canonical_layout", False))
+            and world_size == self.vllm_config.parallel_config.tensor_parallel_size
+        )
         return CPUOffloadingWorker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
             mmap_region=worker_mmap,
+            canonical_layout=canonical_layout,
+            num_slots=world_size,
         )
