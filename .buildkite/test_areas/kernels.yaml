@@ -141,18 +141,27 @@ steps:
   - tests/kernels/quantization/test_rocm_quark_ocp_mx.py
   - tests/kernels/moe/test_ocp_mx_moe.py
   - tests/kernels/moe/utils.py
+  - tests/quantization/reference_mxfp4.py
+  - tests/quantization/test_quark.py
   - vllm/model_executor/layers/quantization/quark/schemes/quark_ocp_mx.py
   - vllm/model_executor/layers/quantization/utils/mxfp4_utils.py
   - vllm/model_executor/layers/fused_moe/
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
+  - requirements/rocm.txt
+  - requirements/test/rocm.in
+  - requirements/test/rocm.txt
   commands:
   - python -c "import torch; actual = torch.cuda.device_count(); assert actual == 1, f'Expected 1 visible GPU, found {actual}'"
   - python -c "from importlib.metadata import version; from packaging.version import Version; actual = Version(version('amd-quark')); required = Version('0.12.0'); assert actual >= required, f'Expected amd-quark>={required}, found {actual}'"
   - python -c "from vllm._aiter_ops import is_aiter_found_and_supported; from vllm.platforms.rocm import on_gfx950; assert on_gfx950(), 'Expected a GFX950 GPU'; assert is_aiter_found_and_supported(), 'Expected a supported AITER installation'"
+  - python -c "from vllm.utils.import_utils import has_triton_kernels; assert has_triton_kernels(), 'Expected conch-triton-kernels'"
+  - python -c "from aiter import quant_mxfp4_hip; from aiter.utility.mx_types import MxScaleRoundMode; assert callable(quant_mxfp4_hip); assert MxScaleRoundMode.Even is not None"
   - pytest -v -s kernels/quantization/test_rocm_quark_ocp_mx.py
-  - pytest -v -s kernels/moe/test_ocp_mx_moe.py -k 'rocm_mxfp4_moe_oracle and AITER_MXFP4_MXFP4'
+  - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_FP4_ASM_GEMM=1 pytest -v -s kernels/quantization/test_rocm_quark_ocp_mx.py
+  - pytest -v -s quantization/test_quark.py -k 'mxfp4_fused_qdq_match_quark or mxfp4_dequant_kernel_match_quark'
+  - pytest -v -s kernels/moe/test_ocp_mx_moe.py -k 'rocm_mxfp4_moe_oracle or aiter_static_fp8_quantization'
 
 - label: Kernels MoE Test %N
   key: kernels-moe-test

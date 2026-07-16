@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 ROCM_AVAILABLE = current_platform.is_rocm()
 GFX950_AVAILABLE = False
@@ -53,15 +54,15 @@ INPUT_QUANT_SPEC = {**WEIGHT_QUANT_SPEC, "is_dynamic": True}
 
 
 def _make_scheme(*, dynamic_weight: bool, out_dtype: torch.dtype) -> QuarkOCP_MX:
-    scheme = QuarkOCP_MX(
-        WEIGHT_QUANT_SPEC,
-        INPUT_QUANT_SPEC,
-        dynamic_mxfp4_quant=dynamic_weight,
-    )
-    scheme.out_dtype = out_dtype
+    # Model construction runs under this context in BaseModelLoader; reproduce
+    # it so ASM capability selection sees the real requested output dtype.
+    with set_default_torch_dtype(out_dtype):
+        scheme = QuarkOCP_MX(
+            WEIGHT_QUANT_SPEC,
+            INPUT_QUANT_SPEC,
+            dynamic_mxfp4_quant=dynamic_weight,
+        )
     assert not scheme.emulate
-    if scheme.rocm_use_aiter_fp4_asm_gemm:
-        pytest.skip("This test covers the default non-ASM AITER MXFP4 GEMM path")
     return scheme
 
 
@@ -104,13 +105,19 @@ def _make_layer(weight: torch.Tensor, scale: torch.Tensor | None = None):
     return layer
 
 
-@pytest.mark.parametrize("m", [1, 33])
+@pytest.mark.parametrize("m", [1, 32, 33, 64, 65])
 @pytest.mark.parametrize("weight_source", ["checkpoint", "dynamic"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("use_bias", [False, True])
 @torch.inference_mode()
-def test_quark_ocp_mx_native_process_and_apply(m: int, weight_source: str):
+def test_quark_ocp_mx_native_process_and_apply(
+    m: int,
+    weight_source: str,
+    dtype: torch.dtype,
+    use_bias: bool,
+):
     torch.manual_seed(11)
     device = torch.device("cuda")
-    dtype = torch.bfloat16
     n = k = 256
 
     float_weight = torch.randn(n, k, dtype=dtype, device=device)
@@ -121,23 +128,44 @@ def test_quark_ocp_mx_native_process_and_apply(m: int, weight_source: str):
         layer = _make_layer(float_weight)
         scheme.process_weights_after_loading(layer)
         row_scale = layer.weight_scale.T.contiguous()
+        dq_weight = dequant_mxfp4(layer.weight, row_scale, dtype)
+        # Dynamic checkpoint conversion and Quark's declared Even QDQ are
+        # the same discrete contract, so value parity must be exact.
+        assert torch.equal(dq_weight, quant_dequant_mxfp4(float_weight))
     else:
         packed_weight, row_scale = _quark_pack_weight(float_weight)
         assert row_scale.shape == (n, k // 32)
+        packed_weight_ref = packed_weight.clone()
+        row_scale_ref = row_scale.clone()
         layer = _make_layer(packed_weight, row_scale)
         scheme.process_weights_after_loading(layer)
+        # The ASM path shuffles the live tensors in-place; decode the untouched
+        # checkpoint layout for the independent arithmetic reference.
+        dq_weight = dequant_mxfp4(packed_weight_ref, row_scale_ref, dtype)
 
-    assert layer.weight_scale.shape == (k // 32, n)
+    expected_scale_shape = (
+        (n, k // 32) if scheme.rocm_use_aiter_fp4_asm_gemm else (k // 32, n)
+    )
+    assert layer.weight_scale.shape == expected_scale_shape
     x = torch.randn(m, k, dtype=dtype, device=device)
-    bias = torch.randn(n, dtype=dtype, device=device)
+    bias = torch.randn(n, dtype=dtype, device=device) if use_bias else None
 
-    dq_weight = dequant_mxfp4(layer.weight, row_scale, dtype)
-    expected = F.linear(quant_dequant_mxfp4(x), dq_weight, bias)
+    # Mirror production's arithmetic order exactly: the GEMM rounds to the
+    # requested output dtype, then apply_weights adds bias and rounds again.
+    # A fused-bias F.linear reference has only one output rounding and is not
+    # mathematically equivalent for BF16/FP16.
+    expected = F.linear(quant_dequant_mxfp4(x), dq_weight)
+    if bias is not None:
+        expected = expected + bias
     actual = scheme.apply_weights(layer, x, bias)
 
-    max_error = (actual.float() - expected.float()).abs().max().item()
-    print(f"Quark OCP MX {weight_source=} M={m}: max absolute error={max_error:.6g}")
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    print(
+        f"Quark OCP MX {weight_source=} M={m} {dtype=} {use_bias=} "
+        f"asm={scheme.rocm_use_aiter_fp4_asm_gemm}"
+    )
+    # With identical discrete operands and the same rounding sequence, any
+    # value difference indicates quantization, layout, or GEMM corruption.
+    torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
 
 
 @torch.inference_mode()

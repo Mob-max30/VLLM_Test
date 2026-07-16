@@ -81,6 +81,39 @@ __all__ = [
 ]
 
 
+def _enforce_quark_w4a4_rounding_contract(
+    backend: Mxfp4MoeBackend,
+    requested_backend: str,
+) -> Mxfp4MoeBackend:
+    """Prevent Quark-Even checkpoints from using AITER's RoundUp W4A4 path.
+
+    AITER's fused W4A4 MoE API currently has no scale-rounding argument and
+    quantizes both activation stages with RoundUp. Quark OCP MXFP4 declares
+    Even scale rounding. Keep this policy local to Quark W4A4: automatic
+    selection falls back to the correct emulation backend, while an explicit
+    AITER request fails rather than silently ignoring the user's choice.
+    """
+    if backend != Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        return backend
+
+    message = (
+        "AITER's fused MXFP4 W4A4 MoE backend uses RoundUp activation-scale "
+        "rounding, but Quark OCP MXFP4 requires Even rounding."
+    )
+    if requested_backend != "auto":
+        raise ValueError(
+            f"{message} Use --moe-backend emulation until AITER exposes an "
+            "Even rounding-mode argument."
+        )
+
+    logger.warning_once(
+        "%s Falling back only this Quark W4A4 MoE layer to emulation; this "
+        "correctness fallback may reduce performance.",
+        message,
+    )
+    return Mxfp4MoeBackend.EMULATION
+
+
 class QuarkMoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
@@ -1016,6 +1049,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             # W4A4: MXFP4 weights + MXFP4 activations
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                 moe, activation_key=kMxfp4Dynamic
+            )
+            self.mxfp4_backend = _enforce_quark_w4a4_rounding_contract(
+                self.mxfp4_backend, moe.moe_backend
             )
 
         # Validation for unsupported schemes

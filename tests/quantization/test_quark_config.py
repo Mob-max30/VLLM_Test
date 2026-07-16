@@ -8,9 +8,25 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.quantization.quark import quark_moe as quark_moe_module
 from vllm.model_executor.layers.quantization.quark.quark import (
     QuarkConfig,
     QuarkKVCacheMethod,
+)
+from vllm.model_executor.layers.quantization.quark.quark_moe import (
+    QuarkMoEMethod,
+    _enforce_quark_w4a4_rounding_contract,
+)
+from vllm.model_executor.layers.quantization.quark.schemes import (
+    QuarkNVFP4,
+    QuarkOCP_MX,
+    QuarkW4A8_MXFP4_FP8,
+    QuarkW8A8Fp8,
+    QuarkW8A8Int8,
+)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_Scheme,
 )
 
 
@@ -25,6 +41,76 @@ OCP_MX_WEIGHT = {
     "scale_format": "e8m0",
     "is_dynamic": False,
 }
+OCP_MX_DYNAMIC_INPUT = {**OCP_MX_WEIGHT, "is_dynamic": True}
+
+FP8_PER_TENSOR_WEIGHT = {
+    "dtype": "fp8_e4m3",
+    "qscheme": "per_tensor",
+    "is_dynamic": False,
+}
+FP8_DYNAMIC_PER_TENSOR_INPUT = {
+    "dtype": "fp8_e4m3",
+    "qscheme": "per_tensor",
+    "is_dynamic": True,
+}
+INT8_STATIC_PER_TENSOR = {
+    "dtype": "int8",
+    "qscheme": "per_tensor",
+    "is_dynamic": False,
+    "symmetric": True,
+}
+MXFP4_STATIC_FP8_INPUT = {
+    "dtype": "fp8_e4m3",
+    "qscheme": "per_tensor",
+    "is_dynamic": False,
+    "symmetric": True,
+}
+INT8_DYNAMIC_PER_TOKEN_INPUT = {
+    "dtype": "int8",
+    "qscheme": "per_channel",
+    "is_dynamic": True,
+    "symmetric": True,
+}
+NVFP4_WEIGHT = [
+    {
+        "dtype": "fp4",
+        "qscheme": "per_group",
+        "group_size": 16,
+        "is_dynamic": False,
+    },
+    {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_tensor",
+        "is_dynamic": False,
+    },
+]
+NVFP4_INPUT = [
+    {
+        "dtype": "fp4",
+        "qscheme": "per_group",
+        "group_size": 16,
+        "is_dynamic": True,
+    },
+    {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_tensor",
+        "is_dynamic": False,
+    },
+]
+FP8_W4A8_WEIGHT = [
+    {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_tensor",
+        "is_dynamic": False,
+    },
+    {
+        "dtype": "int4",
+        "qscheme": "per_channel",
+        "is_dynamic": False,
+        "symmetric": True,
+        "ch_axis": 0,
+    },
+]
 
 
 def make_quark_config(**overrides) -> QuarkConfig:
@@ -36,6 +122,331 @@ def make_quark_config(**overrides) -> QuarkConfig:
     }
     raw_config.update(overrides)
     return QuarkConfig(raw_config)
+
+
+@pytest.mark.parametrize(
+    ("weight", "input_quant", "expected"),
+    [
+        pytest.param(
+            FP8_PER_TENSOR_WEIGHT,
+            FP8_DYNAMIC_PER_TENSOR_INPUT,
+            True,
+            id="dynamic-per-tensor",
+        ),
+        pytest.param(
+            {**FP8_PER_TENSOR_WEIGHT, "qscheme": "per_channel"},
+            {**FP8_DYNAMIC_PER_TENSOR_INPUT, "qscheme": "per_channel"},
+            True,
+            id="dynamic-per-token",
+        ),
+        pytest.param(
+            FP8_PER_TENSOR_WEIGHT,
+            {**FP8_DYNAMIC_PER_TENSOR_INPUT, "is_dynamic": False},
+            True,
+            id="static-per-tensor",
+        ),
+        pytest.param(
+            {**FP8_PER_TENSOR_WEIGHT, "is_dynamic": True},
+            FP8_DYNAMIC_PER_TENSOR_INPUT,
+            False,
+            id="dynamic-weight",
+        ),
+        pytest.param(
+            FP8_PER_TENSOR_WEIGHT,
+            {
+                **FP8_DYNAMIC_PER_TENSOR_INPUT,
+                "is_dynamic": False,
+                "qscheme": "per_channel",
+            },
+            False,
+            id="static-per-channel-input",
+        ),
+        pytest.param(None, FP8_DYNAMIC_PER_TENSOR_INPUT, False, id="missing-weight"),
+        pytest.param(FP8_PER_TENSOR_WEIGHT, None, False, id="missing-input"),
+    ],
+)
+def test_fp8_w8a8_scheme_detection(weight, input_quant, expected: bool):
+    assert make_quark_config()._is_fp8_w8a8(weight, input_quant) is expected
+
+
+@pytest.mark.parametrize(
+    ("weight", "input_quant", "expected"),
+    [
+        pytest.param(
+            INT8_STATIC_PER_TENSOR,
+            INT8_STATIC_PER_TENSOR,
+            True,
+            id="per-tensor",
+        ),
+        pytest.param(
+            {**INT8_STATIC_PER_TENSOR, "qscheme": "per_channel"},
+            {**INT8_STATIC_PER_TENSOR, "symmetric": False},
+            True,
+            id="per-channel-weight-asymmetric-input",
+        ),
+        pytest.param(
+            {**INT8_STATIC_PER_TENSOR, "symmetric": False},
+            INT8_STATIC_PER_TENSOR,
+            False,
+            id="asymmetric-weight",
+        ),
+        pytest.param(
+            INT8_STATIC_PER_TENSOR,
+            {**INT8_STATIC_PER_TENSOR, "is_dynamic": True},
+            False,
+            id="dynamic-input",
+        ),
+        pytest.param(
+            INT8_STATIC_PER_TENSOR,
+            {**INT8_STATIC_PER_TENSOR, "qscheme": "per_channel"},
+            False,
+            id="per-channel-input",
+        ),
+        pytest.param(None, INT8_STATIC_PER_TENSOR, False, id="missing-weight"),
+        pytest.param(INT8_STATIC_PER_TENSOR, None, False, id="missing-input"),
+    ],
+)
+def test_static_int8_w8a8_scheme_detection(weight, input_quant, expected: bool):
+    assert make_quark_config()._is_static_tensor_w8a8(weight, input_quant) is expected
+
+
+@pytest.mark.parametrize(
+    ("weight", "input_quant", "expected_type", "expected_attributes"),
+    [
+        pytest.param(NVFP4_WEIGHT, NVFP4_INPUT, QuarkNVFP4, {}, id="nvfp4"),
+        pytest.param(
+            FP8_PER_TENSOR_WEIGHT,
+            FP8_DYNAMIC_PER_TENSOR_INPUT,
+            QuarkW8A8Fp8,
+            {"is_static_input_scheme": False},
+            id="fp8-w8a8",
+        ),
+        pytest.param(
+            INT8_STATIC_PER_TENSOR,
+            INT8_STATIC_PER_TENSOR,
+            QuarkW8A8Int8,
+            {"qscheme": "per_tensor", "is_static_input_scheme": True},
+            id="static-int8-w8a8",
+        ),
+        pytest.param(
+            OCP_MX_WEIGHT,
+            MXFP4_STATIC_FP8_INPUT,
+            QuarkW4A8_MXFP4_FP8,
+            {"weight_dtype": "mxfp4", "is_static_input_scheme": True},
+            id="mxfp4-fp8-w4a8",
+        ),
+        pytest.param(
+            INT8_STATIC_PER_TENSOR,
+            INT8_DYNAMIC_PER_TOKEN_INPUT,
+            QuarkW8A8Int8,
+            {"qscheme": "per_tensor", "is_static_input_scheme": False},
+            id="dynamic-token-int8-w8a8",
+        ),
+        pytest.param(
+            OCP_MX_WEIGHT,
+            OCP_MX_DYNAMIC_INPUT,
+            QuarkOCP_MX,
+            {"weight_dtype": "mxfp4", "input_dtype": "mxfp4"},
+            id="ocp-mx",
+        ),
+    ],
+)
+def test_scheme_dispatch_covers_every_supported_branch(
+    default_vllm_config,
+    monkeypatch,
+    weight,
+    input_quant,
+    expected_type,
+    expected_attributes,
+):
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    config = make_quark_config()
+    monkeypatch.setattr(
+        config, "_check_scheme_supported", lambda *_args, **_kwargs: True
+    )
+
+    scheme = config._get_scheme_from_config(
+        {"weight": deepcopy(weight), "input_tensors": deepcopy(input_quant)}
+    )
+
+    assert type(scheme) is expected_type
+    for name, expected in expected_attributes.items():
+        assert getattr(scheme, name) == expected
+
+
+@pytest.mark.parametrize(
+    ("weight", "input_quant", "expected_factory"),
+    [
+        pytest.param(
+            FP8_W4A8_WEIGHT,
+            FP8_DYNAMIC_PER_TENSOR_INPUT,
+            "QuarkW4A8Fp8MoEMethod",
+            id="fp8-int4-w4a8",
+        ),
+        pytest.param(
+            NVFP4_WEIGHT,
+            NVFP4_INPUT,
+            "QuarkNvfp4MoEMethod",
+            id="nvfp4",
+        ),
+        pytest.param(
+            FP8_PER_TENSOR_WEIGHT,
+            FP8_DYNAMIC_PER_TENSOR_INPUT,
+            "QuarkW8A8Fp8MoEMethod",
+            id="fp8-w8a8",
+        ),
+        pytest.param(
+            OCP_MX_WEIGHT,
+            OCP_MX_DYNAMIC_INPUT,
+            "QuarkOCP_MX_MoEMethod",
+            id="ocp-mx",
+        ),
+        pytest.param(
+            INT8_STATIC_PER_TENSOR,
+            INT8_STATIC_PER_TENSOR,
+            "QuarkW8A8Int8MoEMethod",
+            id="static-int8",
+        ),
+        pytest.param(
+            INT8_STATIC_PER_TENSOR,
+            INT8_DYNAMIC_PER_TOKEN_INPUT,
+            "QuarkW8A8Int8MoEMethod",
+            id="dynamic-token-int8",
+        ),
+    ],
+)
+def test_moe_dispatch_covers_every_supported_branch(
+    monkeypatch,
+    weight,
+    input_quant,
+    expected_factory: str,
+):
+    config = make_quark_config()
+    layer_config = {
+        "weight": deepcopy(weight),
+        "input_tensors": deepcopy(input_quant),
+    }
+    monkeypatch.setattr(config, "_find_matched_config", lambda *_args: layer_config)
+
+    factory_names = [
+        "QuarkW4A8Fp8MoEMethod",
+        "QuarkNvfp4MoEMethod",
+        "QuarkW8A8Fp8MoEMethod",
+        "QuarkOCP_MX_MoEMethod",
+        "QuarkW8A8Int8MoEMethod",
+    ]
+    sentinels = {name: object() for name in factory_names}
+    calls: list[str] = []
+
+    for name in factory_names:
+
+        def factory(*_args, _name=name, **_kwargs):
+            calls.append(_name)
+            return sentinels[_name]
+
+        monkeypatch.setattr(quark_moe_module, name, factory)
+
+    result = QuarkMoEMethod.get_moe_method(
+        config,
+        module=SimpleNamespace(moe_config=object()),
+        layer_name="model.layers.0.mlp.experts",
+    )
+
+    assert result is sentinels[expected_factory]
+    assert calls == [expected_factory]
+
+
+def _ocp_spec(dtype: str, *, dynamic: bool) -> dict:
+    return {**OCP_MX_WEIGHT, "dtype": dtype, "is_dynamic": dynamic}
+
+
+@pytest.mark.parametrize(
+    ("weight_dtype", "input_dtype", "expected_scheme"),
+    [
+        ("fp4", None, OCP_MX_Scheme.w_mxfp4),
+        ("fp4", "fp4", OCP_MX_Scheme.w_mxfp4_a_mxfp4),
+        ("fp4", "fp6_e3m2", OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2),
+        ("fp4", "fp6_e2m3", OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3),
+        ("fp4", "fp8_e4m3", OCP_MX_Scheme.w_mxfp4_a_fp8),
+        ("fp6_e3m2", None, OCP_MX_Scheme.w_mxfp6_e3m2),
+        (
+            "fp6_e3m2",
+            "fp6_e3m2",
+            OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
+        ),
+        ("fp6_e3m2", "fp8_e4m3", OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8),
+        ("fp6_e2m3", None, OCP_MX_Scheme.w_mxfp6_e2m3),
+        (
+            "fp6_e2m3",
+            "fp6_e2m3",
+            OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
+        ),
+        ("fp6_e2m3", "fp8_e4m3", OCP_MX_Scheme.w_mxfp6_e2m3_a_fp8),
+    ],
+)
+def test_ocp_mx_constructor_maps_every_supported_dtype_pair(
+    weight_dtype: str,
+    input_dtype: str | None,
+    expected_scheme: OCP_MX_Scheme,
+):
+    input_quant = None if input_dtype is None else _ocp_spec(input_dtype, dynamic=True)
+    scheme = QuarkOCP_MX(
+        _ocp_spec(weight_dtype, dynamic=False),
+        input_quant,
+    )
+
+    assert scheme.ocp_mx_scheme is expected_scheme
+
+
+@pytest.mark.parametrize(
+    ("weight_dtype", "input_dtype"),
+    [
+        ("fp6_e3m2", "fp4"),
+        ("fp6_e3m2", "fp6_e2m3"),
+        ("fp6_e2m3", "fp4"),
+        ("fp6_e2m3", "fp6_e3m2"),
+    ],
+)
+def test_ocp_mx_mixed_dtype_pairs_without_enum_use_emulation(
+    weight_dtype: str, input_dtype: str
+):
+    config = make_quark_config()
+    layer_config = {
+        "weight": _ocp_spec(weight_dtype, dynamic=False),
+        "input_tensors": _ocp_spec(input_dtype, dynamic=True),
+    }
+
+    scheme = config._get_scheme_from_config(layer_config)
+
+    assert isinstance(scheme, QuarkOCP_MX)
+    assert scheme.ocp_mx_scheme is None
+    assert scheme.emulate
+
+
+def test_quark_w4a4_auto_uses_even_correct_emulation():
+    backend = _enforce_quark_w4a4_rounding_contract(
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP4, "auto"
+    )
+
+    assert backend is Mxfp4MoeBackend.EMULATION
+
+
+@pytest.mark.parametrize("requested_backend", ["aiter", "aiter_mxfp4_mxfp4"])
+def test_quark_w4a4_explicit_aiter_rejects_roundup(requested_backend: str):
+    with pytest.raises(ValueError, match="requires Even rounding"):
+        _enforce_quark_w4a4_rounding_contract(
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP4, requested_backend
+        )
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [Mxfp4MoeBackend.EMULATION, Mxfp4MoeBackend.TRITON],
+)
+def test_quark_w4a4_rounding_contract_preserves_other_backends(
+    backend: Mxfp4MoeBackend,
+):
+    assert _enforce_quark_w4a4_rounding_contract(backend, "auto") is backend
 
 
 @pytest.mark.parametrize("dtype", ["fp4", "fp6_e3m2", "fp6_e2m3"])

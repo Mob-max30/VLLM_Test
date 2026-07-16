@@ -47,7 +47,8 @@ try:
     from vllm.utils.torch_utils import direct_register_custom_op
 
     if rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled():
-        from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+        from aiter import gemm_a4w4, quant_mxfp4_hip
+        from aiter.utility.mx_types import MxScaleRoundMode
 
     def gemm_with_dynamic_quant(
         x: torch.Tensor,
@@ -63,11 +64,21 @@ try:
         if rocm_use_aiter_fp4_asm_gemm:
             if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K):
                 if x_scales is None:
-                    # use hip quant kernel for performance
+                    # Quark OCP MX checkpoints require Even E8M0 scale
+                    # calculation. AITER's generic per-1x32 default is
+                    # RoundUp, so select Even explicitly for the ASM path.
                     if M >= 32:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+                        x_q, x_s = quant_mxfp4_hip(
+                            x,
+                            round_mode=MxScaleRoundMode.Even,
+                            e8m0_shuffle=True,
+                        )
                     else:
-                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
+                        x_q, x_s = quant_mxfp4_hip(
+                            x,
+                            round_mode=MxScaleRoundMode.Even,
+                            e8m0_shuffle=False,
+                        )
                 else:
                     x_q = x
                     x_s = x_scales
@@ -90,8 +101,11 @@ try:
                 )
             else:
                 if x_scales is None:
-                    # use hip quant kernel for performance
-                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+                    x_q, x_s = quant_mxfp4_hip(
+                        x,
+                        round_mode=MxScaleRoundMode.Even,
+                        e8m0_shuffle=True,
+                    )
                 else:
                     x_q = x
                     x_s = x_scales
@@ -207,9 +221,27 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
+        asm_requested = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+        # Dynamically quantized weights are produced in the unshuffled layout.
+        # Until that load path performs the ASM weight/scale shuffle, retain
+        # the native non-ASM AITER kernel rather than passing invalid layouts.
         self.rocm_use_aiter_fp4_asm_gemm = (
-            rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+            asm_requested
+            and not self.dynamic_mxfp4_quant
+            and self.out_dtype == torch.bfloat16
         )
+        if asm_requested and self.dynamic_mxfp4_quant:
+            logger.warning_once(
+                "Quark OCP MX dynamic weight quantization does not yet support "
+                "the AITER FP4 ASM weight layout; using the native non-ASM "
+                "AITER kernel."
+            )
+        elif asm_requested and self.out_dtype != torch.bfloat16:
+            logger.warning_once(
+                "The AITER FP4 ASM GEMM supports BF16 output only; using the "
+                "native non-ASM AITER kernel for out_dtype=%s.",
+                self.out_dtype,
+            )
 
         if not self.emulate and (dynamic_mxfp4_quant is None or gemm_afp4wfp4 is None):
             # Currently need these kernels if not emulating

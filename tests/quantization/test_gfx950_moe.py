@@ -222,7 +222,7 @@ def mxfp4_oracle_config():
 @REQUIRES_GFX950
 @REQUIRES_AITER
 def test_w4a4_dispatches_to_aiter(mxfp4_oracle_config, aiter_moe_control):
-    """With AITER enabled + GFX950, W4A4 selects AITER_MXFP4_MXFP4."""
+    """Characterize generic RoundUp W4A4 dispatch, not Quark correctness."""
     aiter_moe_control(True)
     config = _make_w4a4_moe_config()
     backend, experts_cls = select_mxfp4_moe_backend(
@@ -372,15 +372,14 @@ def test_gptoss_rocm_quark_mxfp4_fp8_moe_initializes():
 @pytest.mark.parametrize(
     "moe_backend",
     [
-        pytest.param(None, id="auto"),
-        pytest.param("aiter", marks=[REQUIRES_GFX950, REQUIRES_AITER], id="aiter"),
+        pytest.param(None, marks=[REQUIRES_GFX950, REQUIRES_AITER], id="auto-fallback"),
         pytest.param("emulation", id="emulation"),
     ],
 )
 def test_deepseek_rocm_quark_mxfp4_uint8_moe_backends_initialize(
     moe_backend: str | None,
 ):
-    """Initialize DeepSeek Quark MXFP4/UINT8 across ROCm MoE backends."""
+    """Initialize DeepSeek Quark W4A4 with correct Even-scale emulation."""
     repo_id = "amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant"
     _require_repo_access(repo_id)
     _can_initialize(
@@ -391,5 +390,7 @@ def test_deepseek_rocm_quark_mxfp4_uint8_moe_backends_initialize(
             "1",
             *([] if moe_backend is None else ["--moe-backend", moe_backend]),
         ],
-        env=AITER_MOE_ENV if moe_backend == "aiter" else NO_AITER_ENV,
+        # Auto selection begins with AITER enabled and exercises the Quark-only
+        # RoundUp-to-Even fallback. Explicit emulation covers the direct path.
+        env=AITER_MOE_ENV if moe_backend is None else NO_AITER_ENV,
     )

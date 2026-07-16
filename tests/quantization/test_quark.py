@@ -8,6 +8,7 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 """
 
 import importlib.metadata
+import math
 import os
 from dataclasses import dataclass
 from functools import lru_cache
@@ -62,10 +63,29 @@ QUARK_MXFP4_AVAILABLE = _has_quark_mxfp4_support()
 
 DEVICE_TYPE = current_platform.device_type
 
+_PARIS_PROMPTS = ["Answer with one word only. The capital of France is"]
+_SMOKE_PROMPTS = ["Tell me a short fact."]
+
 if QUARK_MXFP4_AVAILABLE:
     from quark.torch.export.nn.modules.realquantizer import StaticScaledRealQuantizer
     from quark.torch.kernel import mx as mx_kernel
     from quark.torch.quantization.config.config import FP4PerGroupSpec
+
+
+def _assert_generation_succeeds(
+    outputs: list[tuple[list[int], str]],
+    *,
+    required_word: str | None = None,
+) -> None:
+    assert len(outputs) == 1
+    token_ids, text = outputs[0]
+    print(f"[quark] generated text: {text!r}")
+    assert token_ids, "expected at least one generated token"
+    assert text.strip(), "expected non-empty generated text"
+    if required_word is not None:
+        assert required_word in text.lower(), (
+            f"expected generated text to contain {required_word!r}, got {text!r}"
+        )
 
 
 @lru_cache
@@ -124,8 +144,9 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        assert output
+        outputs = llm.generate_greedy(_PARIS_PROMPTS, max_tokens=4)
+
+    _assert_generation_succeeds(outputs, required_word="paris")
 
 
 @pytest.mark.skipif(
@@ -151,8 +172,9 @@ def test_quark_fp8_w_per_channel_a_per_token(vllm_runner, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        assert output
+        outputs = llm.generate_greedy(_PARIS_PROMPTS, max_tokens=4)
+
+    _assert_generation_succeeds(outputs, required_word="paris")
 
 
 @pytest.mark.parametrize("tp", [1])
@@ -170,8 +192,9 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        assert output
+        outputs = llm.generate_greedy(_PARIS_PROMPTS, max_tokens=4)
+
+    _assert_generation_succeeds(outputs, required_word="paris")
 
 
 @pytest.mark.parametrize("tp", [1])
@@ -198,8 +221,9 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello", max_tokens=4)
-        assert output
+        outputs = llm.generate_greedy(_SMOKE_PROMPTS, max_tokens=4)
+
+    _assert_generation_succeeds(outputs)
 
 
 @pytest.mark.skipif(
@@ -234,7 +258,8 @@ def test_quark_fp8_parity(vllm_runner):
 @dataclass
 class AccuracyTestConfig:
     model_name: str
-    excepted_value: float
+    expected_value: float
+    revision: str | None = None
 
     def get_model_args(
         self,
@@ -255,6 +280,8 @@ class AccuracyTestConfig:
         }
         if model_max_len is not None:
             model_args["max_model_len"] = model_max_len
+        if self.revision is not None:
+            model_args["revision"] = self.revision
 
         return model_args
 
@@ -263,23 +290,159 @@ GSM8K_ACCURACY_CONFIGS = [
     # Private model.
     AccuracyTestConfig(
         model_name="amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant",
-        excepted_value=0.96,
+        expected_value=0.96,
     ),
 ]
 
 WIKITEXT_ACCURACY_CONFIGS = [
     AccuracyTestConfig(
         model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3",
-        excepted_value=11.3,
+        expected_value=11.3,
+        revision="f0020480686f0a8e9cce0e6c396f41d5269b7019",
     ),
     AccuracyTestConfig(
         model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
-        excepted_value=10.6,
+        expected_value=10.6,
+        revision="ed8c2a6a7e62e56c8532b3f5d7d39a0a25c97441",
     ),
     AccuracyTestConfig(
-        model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.4
+        model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4",
+        expected_value=12.4,
+        revision="a9a4cfbc1b7d7182f36b11d12ae1db1214b41d1c",
     ),
 ]
+
+# These are historical regression budgets, not floating-point tolerances.
+# Perplexity P=exp(H), so an allowed increase dP corresponds exactly to a
+# mean word-NLL increase log((P+dP)/P). The 0.1 Wikitext budget below is
+# 0.00803--0.00939 nats/word for the three baselines. GSM8K exact match has
+# granularity 1/1319; the 0.93 score floor is 1227 correct answers.
+WIKITEXT_MAX_PERPLEXITY_INCREASE = 0.1
+NVFP4_MAX_PERPLEXITY_INCREASE = 0.25
+GSM8K_MAX_ACCURACY_DROP = 0.03
+GSM8K_TEST_SIZE = 1319
+WIKITEXT_EFFECTIVE_DOCS = 62
+
+
+def _assert_perplexity_did_not_regress(
+    measured: float,
+    baseline: float,
+    max_increase: float,
+    *,
+    model_name: str,
+) -> None:
+    assert baseline >= 1.0, f"Invalid perplexity baseline: {baseline}"
+    assert max_increase >= 0.0, f"Invalid perplexity budget: {max_increase}"
+    assert math.isfinite(measured), f"Non-finite perplexity for {model_name}"
+    assert measured >= 1.0, f"Invalid perplexity for {model_name}: {measured}"
+    ceiling = baseline + max_increase
+    nll_budget = math.log(ceiling / baseline)
+    print(
+        f"Model: {model_name} | Baseline perplexity: {baseline} | "
+        f"Measured: {measured} | Maximum: {ceiling} | "
+        f"Mean word-NLL budget: {nll_budget:.6f} nats"
+    )
+    assert measured <= ceiling, (
+        f"Perplexity regression for {model_name}: measured {measured}, "
+        f"maximum {ceiling}"
+    )
+
+
+def _assert_accuracy_did_not_regress(
+    measured: float,
+    baseline: float,
+    max_drop: float,
+    *,
+    model_name: str,
+    dataset_size: int,
+) -> None:
+    assert 0.0 <= baseline <= 1.0, f"Invalid accuracy baseline: {baseline}"
+    assert 0.0 <= max_drop <= baseline, f"Invalid accuracy budget: {max_drop}"
+    assert dataset_size > 0, f"Invalid dataset size: {dataset_size}"
+    assert math.isfinite(measured), f"Non-finite accuracy for {model_name}"
+    assert 0.0 <= measured <= 1.0, f"Invalid accuracy for {model_name}: {measured}"
+    measured_correct = round(measured * dataset_size)
+    measured_from_count = measured_correct / dataset_size
+    assert math.isclose(
+        measured,
+        measured_from_count,
+        abs_tol=4 * math.ulp(measured),
+        rel_tol=0.0,
+    ), (
+        f"Accuracy for {model_name} is not an exact {dataset_size}-sample mean: "
+        f"{measured}"
+    )
+    minimum_correct = math.ceil((baseline - max_drop) * dataset_size)
+    print(
+        f"Model: {model_name} | Baseline accuracy: {baseline} | "
+        f"Measured: {measured_correct}/{dataset_size} ({measured}) | "
+        f"Minimum: {minimum_correct}/{dataset_size}"
+    )
+    assert measured_correct >= minimum_correct, (
+        f"Accuracy regression for {model_name}: measured "
+        f"{measured_correct}/{dataset_size}, minimum {minimum_correct}/{dataset_size}"
+    )
+
+
+def _assert_effective_sample_count(results: dict, *, task: str, expected: int) -> None:
+    effective = results["n-samples"][task]["effective"]
+    assert effective == expected, (
+        f"{task} dataset/harness drift: expected {expected} effective samples, "
+        f"found {effective}"
+    )
+
+
+def test_perplexity_regression_bound_is_one_sided_and_inclusive():
+    _assert_perplexity_did_not_regress(10.0, 11.3, 0.1, model_name="test")
+    _assert_perplexity_did_not_regress(11.4, 11.3, 0.1, model_name="test")
+    with pytest.raises(AssertionError, match="Perplexity regression"):
+        _assert_perplexity_did_not_regress(
+            math.nextafter(11.4, math.inf), 11.3, 0.1, model_name="test"
+        )
+
+
+@pytest.mark.parametrize("invalid", [math.nan, math.inf, 0.999])
+def test_perplexity_regression_bound_rejects_invalid_metrics(invalid: float):
+    with pytest.raises(AssertionError):
+        _assert_perplexity_did_not_regress(invalid, 11.3, 0.1, model_name="test")
+
+
+def test_accuracy_regression_bound_uses_exact_dataset_counts():
+    minimum_correct = 1227
+    _assert_accuracy_did_not_regress(
+        1.0,
+        0.96,
+        0.03,
+        model_name="test",
+        dataset_size=GSM8K_TEST_SIZE,
+    )
+    _assert_accuracy_did_not_regress(
+        minimum_correct / GSM8K_TEST_SIZE,
+        0.96,
+        0.03,
+        model_name="test",
+        dataset_size=GSM8K_TEST_SIZE,
+    )
+    with pytest.raises(AssertionError, match="Accuracy regression"):
+        _assert_accuracy_did_not_regress(
+            (minimum_correct - 1) / GSM8K_TEST_SIZE,
+            0.96,
+            0.03,
+            model_name="test",
+            dataset_size=GSM8K_TEST_SIZE,
+        )
+
+
+@pytest.mark.parametrize("invalid", [math.nan, math.inf, -0.1, 1.1, 0.93])
+def test_accuracy_regression_bound_rejects_invalid_metrics(invalid: float):
+    with pytest.raises(AssertionError):
+        _assert_accuracy_did_not_regress(
+            invalid,
+            0.96,
+            0.03,
+            model_name="test",
+            dataset_size=GSM8K_TEST_SIZE,
+        )
 
 
 @pytest.mark.skipif(
@@ -299,7 +462,6 @@ WIKITEXT_ACCURACY_CONFIGS = [
 )
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     task = "wikitext"
-    atol = 0.1
 
     # Smaller cudagraph_capture_sizes to speed up the test.
     results = lm_eval.simple_evaluate(
@@ -310,14 +472,15 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
         tasks=task,
         batch_size=64,
     )
+    _assert_effective_sample_count(results, task=task, expected=WIKITEXT_EFFECTIVE_DOCS)
 
-    expected_value = config.excepted_value
     measured_value = results["results"][task]["word_perplexity,none"]
-    print(
-        f"Expected: {expected_value} | Measured: {measured_value} | "
-        f"Absolute tolerance: {atol}"
+    _assert_perplexity_did_not_regress(
+        measured_value,
+        config.expected_value,
+        WIKITEXT_MAX_PERPLEXITY_INCREASE,
+        model_name=config.model_name,
     )
-    assert measured_value == pytest.approx(expected_value, abs=atol, rel=0)
 
 
 @pytest.mark.skipif(
@@ -338,11 +501,10 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
     model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
     task = "wikitext"
 
-    atol = 0.25
-
     config = AccuracyTestConfig(
         model_name=model_name,
-        excepted_value=expected_value,
+        expected_value=expected_value,
+        revision="8118f8b6187d46e80c05fafc4a23812304fd7db0",
     )
 
     model_args = config.get_model_args(
@@ -360,14 +522,15 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
         tasks=task,
         batch_size=64,
     )
+    _assert_effective_sample_count(results, task=task, expected=WIKITEXT_EFFECTIVE_DOCS)
 
-    expected_value = config.excepted_value
     measured_value = results["results"][task]["word_perplexity,none"]
-    print(
-        f"Expected: {expected_value} | Measured: {measured_value} | "
-        f"Absolute tolerance: {atol}"
+    _assert_perplexity_did_not_regress(
+        measured_value,
+        config.expected_value,
+        NVFP4_MAX_PERPLEXITY_INCREASE,
+        model_name=config.model_name,
     )
-    assert measured_value == pytest.approx(expected_value, abs=atol, rel=0)
 
 
 @pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
@@ -380,8 +543,6 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
     _require_hf_repo_access(config.model_name)
 
     task = "gsm8k"
-    atol = 0.03
-
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=config.get_model_args(tp_size=8, model_max_len=38768),
@@ -389,14 +550,16 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
         batch_size=64,
         num_fewshot=8,
     )
+    _assert_effective_sample_count(results, task=task, expected=GSM8K_TEST_SIZE)
 
-    expected_value = config.excepted_value
     measured_value = results["results"][task]["exact_match,strict-match"]
-    print(
-        f"Expected: {expected_value} | Measured: {measured_value} | "
-        f"Absolute tolerance: {atol}"
+    _assert_accuracy_did_not_regress(
+        measured_value,
+        config.expected_value,
+        GSM8K_MAX_ACCURACY_DROP,
+        model_name=config.model_name,
+        dataset_size=GSM8K_TEST_SIZE,
     )
-    assert measured_value == pytest.approx(expected_value, abs=atol, rel=0)
 
 
 @pytest.mark.skipif(
@@ -425,9 +588,53 @@ def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[in
         assert torch.all(torch.isfinite(res_hip[:, i * 32 : (i + 1) * 32]))
         assert torch.all(torch.isfinite(res_torch[:, i * 32 : (i + 1) * 32]))
 
-        torch.testing.assert_close(
-            res_hip[:, i * 32 : (i + 1) * 32], res_torch[:, i * 32 : (i + 1) * 32]
-        )
+    # Both paths implement the same deterministic OCP MX quantize/dequantize
+    # contract, including signed zero. Compare the raw FP16/BF16 encodings;
+    # there is no floating-point accumulation noise to tolerate here.
+    assert torch.equal(res_hip.view(torch.uint16), res_torch.view(torch.uint16))
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
+def test_mxfp4_fused_qdq_match_quark_boundaries(float_dtype: torch.dtype):
+    # FP4 E2M1 round-to-nearest-even midpoints at unit scale, plus signed zero.
+    midpoints = [
+        -0.0,
+        0.0,
+        0.25,
+        0.75,
+        1.25,
+        1.75,
+        2.5,
+        3.5,
+        5.0,
+        -0.25,
+        -0.75,
+        -1.25,
+        -1.75,
+        -2.5,
+        -3.5,
+        -5.0,
+    ]
+    midpoint_block = (midpoints * 2)[:32]
+
+    # Quark Even and AITER RoundUp choose different E8M0 scales when the
+    # normalized block maximum is strictly between 1.5 and 1.75. Probe both
+    # shared boundaries and interior representable values with a sentinel
+    # that changes FP4 rounding if the scale mode is wrong.
+    scale_transition_maxima = [1.5, 1.5078125, 1.625, 1.7421875, 1.75]
+    blocks = [midpoint_block]
+    for maximum in scale_transition_maxima:
+        blocks.append([maximum, 0.375, -0.375, *([0.0] * 29)])
+
+    values = torch.tensor(blocks, dtype=float_dtype, device=DEVICE_TYPE)
+    res_hip = mx_kernel.qdq_mxfp4_hip(values.clone(), "even")
+    res_torch = qdq_mxfp4_torch(values, "even")
+
+    assert torch.equal(res_hip.view(torch.uint16), res_torch.view(torch.uint16))
 
 
 @pytest.mark.skipif(
@@ -482,7 +689,7 @@ def test_mxfp4_dequant_kernel_match_quark(
 
     out_torch = dq_mxfp4_torch(w_mxfp4, scale, float_dtype)
 
-    assert torch.equal(out_hip, out_torch)
+    assert torch.equal(out_hip.view(torch.uint16), out_torch.view(torch.uint16))
 
 
 # Unit tests for ``is_layer_skipped`` fused-name handling.
