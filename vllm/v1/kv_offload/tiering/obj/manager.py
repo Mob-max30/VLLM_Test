@@ -98,7 +98,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
-    medium: ClassVar[str] = MEDIUM_OBJ
+    event_medium: ClassVar[str] = MEDIUM_OBJ
     filter_medium: ClassVar[Medium | None] = Medium.STORAGE
 
     def __init__(
@@ -329,7 +329,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 keys = self._store_job_keys.pop(result.job_id, None)
                 if result.success and keys:
                     self.events.append(
-                        OffloadingEvent(keys=keys, medium=self.medium, removed=False)
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.event_medium,
+                            removed=False,
+                        )
                     )
         return results
 
