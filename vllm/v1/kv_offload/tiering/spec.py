@@ -47,6 +47,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.tiering.common import get_tiering_metric_definitions
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
@@ -77,6 +78,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
         metrics = super().build_metric_definitions(extra_config)
+        metrics.update(get_tiering_metric_definitions())
         secondary_tier_configs = extra_config.get("secondary_tiers", [])
         if not isinstance(secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")

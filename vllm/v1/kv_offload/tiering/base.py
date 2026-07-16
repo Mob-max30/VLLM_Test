@@ -6,7 +6,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -48,6 +48,8 @@ class JobResult:
 
     job_id: JobId
     success: bool
+    transfer_size: int | None = field(default=None, compare=False)
+    transfer_time: float | None = field(default=None, compare=False)
 
 
 class ParentManager(ABC):

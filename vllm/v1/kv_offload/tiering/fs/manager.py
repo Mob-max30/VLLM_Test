@@ -18,6 +18,7 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
+import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -143,6 +144,8 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+        self._job_transfer_sizes: dict[int, int] = {}
+        self._job_submitted_at: dict[int, float] = {}
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -157,6 +160,7 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
+        keys = list(job_metadata.keys)
         tasks = (
             functools.partial(
                 store_block,
@@ -165,12 +169,15 @@ class FileSystemTierManager(SecondaryTierManager):
                 int(bid) * self._block_size,
                 self._block_size,
             )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+            for key, bid in zip(keys, job_metadata.block_ids)
         )
-        self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
+        self._job_transfer_sizes[job_metadata.job_id] = len(keys) * self._block_size
+        self._job_submitted_at[job_metadata.job_id] = time.monotonic()
+        self._pool.enqueue_store(job_metadata.job_id, len(keys), tasks)
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
+        keys = list(job_metadata.keys)
         tasks = (
             functools.partial(
                 load_block,
@@ -179,19 +186,31 @@ class FileSystemTierManager(SecondaryTierManager):
                 int(bid) * self._block_size,
                 self._block_size,
             )
-            for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
+            for key, bid in zip(keys, job_metadata.block_ids)
         )
-        self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
+        self._job_transfer_sizes[job_metadata.job_id] = len(keys) * self._block_size
+        self._job_submitted_at[job_metadata.job_id] = time.monotonic()
+        self._pool.enqueue_load(job_metadata.job_id, len(keys), tasks)
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Collect completed jobs from the finished-jobs queue.
         """
-        return (
-            JobResult(job_id=job_id, success=success)
-            for job_id, success in self._pool.get_finished()
-        )
+        results = []
+        now = time.monotonic()
+        for job_id, success in self._pool.get_finished():
+            submitted_at = self._job_submitted_at.pop(job_id, None)
+            transfer_time = None if submitted_at is None else now - submitted_at
+            results.append(
+                JobResult(
+                    job_id=job_id,
+                    success=success,
+                    transfer_size=self._job_transfer_sizes.pop(job_id, None),
+                    transfer_time=transfer_time,
+                )
+            )
+        return results
 
     @override
     def drain_jobs(self) -> None:
