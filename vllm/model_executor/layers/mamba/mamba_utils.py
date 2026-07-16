@@ -81,6 +81,24 @@ class MambaStateDtypeCalculator:
         )
 
     @classmethod
+    def mamba2_replayssm_state_dtype(
+        cls,
+        model_dtype: ModelDType | torch.dtype,
+        mamba_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaDType,
+    ) -> tuple[torch.dtype, ...]:
+        """Mamba2 ReplaySSM state dtypes: baseline ``(conv, ssm)`` plus the
+        ring-buffer dtypes ``(x_cache, dt_cache, B_cache)`` =
+        ``(activation, fp32, activation)``. Call only when use_replayssm is on;
+        must stay in sync with ``MambaMixer2.get_state_dtype``.
+        """
+        conv_dtype, ssm_dtype = cls.mamba2_state_dtype(
+            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
+        )
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        return conv_dtype, ssm_dtype, activation_dtype, torch.float32, activation_dtype
+
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -114,6 +132,27 @@ class MambaStateDtypeCalculator:
         return cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
+
+    @classmethod
+    def gated_delta_net_replayssm_state_dtype(
+        cls,
+        model_dtype: ModelDType | torch.dtype,
+        mamba_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaDType,
+    ) -> tuple[torch.dtype, ...]:
+        """GDN ReplaySSM state dtypes: baseline ``(conv, ssm)`` plus the ring
+        cache dtypes ``(d_cache, k_cache, g_cache)``. The ``d``/``k`` input
+        caches use fp16 for bf16 activations; ``g_cache`` is float32. Call only
+        when use_replayssm is on.
+        """
+        conv_dtype, ssm_dtype = cls._mamba_state_dtype(
+            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
+        )
+        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
+        cache_dtype = (
+            torch.float16 if activation_dtype == torch.bfloat16 else activation_dtype
+        )
+        return conv_dtype, ssm_dtype, cache_dtype, cache_dtype, torch.float32
 
     @classmethod
     def kda_state_dtype(
@@ -187,6 +226,49 @@ class MambaStateShapeCalculator:
         return conv_state_shape, temporal_state_shape
 
     @classmethod
+    def mamba2_replayssm_state_shape(
+        cls,
+        tp_world_size: int,
+        intermediate_size: int,
+        n_groups: int,
+        num_heads: int,
+        head_dim: int,
+        state_size: int,
+        conv_kernel: int,
+        replayssm_buffer_len: int,
+        num_spec: int = 0,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Mamba2 ReplaySSM state shapes: baseline ``(conv, ssm)`` plus the
+        ring-buffer shapes ``x_cache``/``dt_cache``/``B_cache``. Delegates to
+        ``mamba2_state_shape`` for ``(conv, ssm)`` so the ring buffers keep the
+        un-extended ``n_groups`` (that method extends n_groups only in its own
+        scope). Call only when use_replayssm is on; must stay in sync with
+        ``MambaMixer2.get_state_shape``.
+        """
+        conv_state_shape, temporal_state_shape = cls.mamba2_state_shape(
+            tp_world_size=tp_world_size,
+            intermediate_size=intermediate_size,
+            n_groups=n_groups,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            state_size=state_size,
+            conv_kernel=conv_kernel,
+            num_spec=num_spec,
+        )
+        local_nheads = divide(num_heads, tp_world_size)
+        local_ngroups = divide(n_groups, tp_world_size)
+        x_cache_shape = (local_nheads, replayssm_buffer_len, head_dim)
+        dt_cache_shape = (local_nheads, replayssm_buffer_len)
+        B_cache_shape = (local_ngroups, replayssm_buffer_len, state_size)
+        return (
+            conv_state_shape,
+            temporal_state_shape,
+            x_cache_shape,
+            dt_cache_shape,
+            B_cache_shape,
+        )
+
+    @classmethod
     def short_conv_state_shape(
         cls,
         tp_world_size: int,
@@ -232,6 +314,46 @@ class MambaStateShapeCalculator:
             head_k_dim,
         )
         return conv_state_shape, temporal_state_shape
+
+    @classmethod
+    def gated_delta_net_replayssm_state_shape(
+        cls,
+        tp_world_size: int,
+        num_k_heads: int,
+        num_v_heads: int,
+        head_k_dim: int,
+        head_v_dim: int,
+        conv_kernel_size: int,
+        replayssm_buffer_len: int,
+        num_spec: int = 0,
+    ) -> tuple[tuple[int, ...], ...]:
+        """GDN ReplaySSM state shapes: baseline ``(conv, ssm)`` plus the cached
+        ring-buffer shapes ``d_cache``/``k_cache``/``g_cache``. Head counts use
+        the (un-extended) ``num_v_heads``/``num_k_heads`` divided by
+        ``tp_world_size``, matching ``gated_delta_net_state_shape``. Call only
+        when use_replayssm is on.
+        """
+        conv_state_shape, temporal_state_shape = cls.gated_delta_net_state_shape(
+            tp_world_size,
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_kernel_size,
+            num_spec,
+        )
+        local_v_heads = divide(num_v_heads, tp_world_size)
+        local_k_heads = divide(num_k_heads, tp_world_size)
+        d_cache_shape = (local_v_heads, replayssm_buffer_len, head_v_dim)
+        k_cache_shape = (local_k_heads, replayssm_buffer_len, head_k_dim)
+        g_cache_shape = (local_v_heads, replayssm_buffer_len)
+        return (
+            conv_state_shape,
+            temporal_state_shape,
+            d_cache_shape,
+            k_cache_shape,
+            g_cache_shape,
+        )
 
     @classmethod
     def kda_state_shape(
