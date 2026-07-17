@@ -9,7 +9,7 @@ use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
@@ -36,6 +36,7 @@ pub(crate) struct ClientInner {
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
+    health_tx: watch::Sender<bool>,
 }
 
 impl ClientInner {
@@ -57,6 +58,7 @@ impl ClientInner {
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
+            health_tx: watch::Sender::new(true),
         }
     }
 
@@ -169,6 +171,7 @@ impl ClientInner {
     /// persistent health error.
     pub fn close_registries(&self, error: Arc<Error>) {
         let persistent_error = self.record_health_error(error);
+        self.publish_unhealthy();
         let request_senders = self.request_reg.lock().close();
         let utility_senders = self.utility_reg.lock().close();
 
@@ -189,6 +192,12 @@ impl ClientInner {
     /// Return whether the client still considers the engine healthy.
     pub fn is_healthy(&self) -> bool {
         self.health_error.load().is_none()
+    }
+
+    /// Subscribe to engine health changes. The current value is `true` while
+    /// the client is healthy and changes permanently to `false` on failure.
+    pub fn subscribe_health(&self) -> watch::Receiver<bool> {
+        self.health_tx.subscribe()
     }
 
     /// Resolve one utility output to the waiting caller. Returns `true` if a
@@ -266,18 +275,27 @@ impl ClientInner {
         Some(engine_id)
     }
 
-    /// Publish the first persistent health error and return the sticky error
-    /// recorded for this client. Later failures do not overwrite the first
-    /// one so `/health` and post-close callers observe a stable cause.
+    /// Preserve and return the first persistent health error.
     fn record_health_error(&self, error: Arc<Error>) -> Arc<Error> {
-        if let Some(existing) = self.health_error.load_full() {
-            return existing;
+        if let Some(existing) = self.health_error() {
+            existing
+        } else {
+            self.health_error
+                .rcu(|current| current.clone().unwrap_or_else(|| error.clone()));
+            self.health_error()
+                .expect("health error must be recorded before registries close")
         }
-        self.health_error
-            .rcu(|current| current.clone().unwrap_or_else(|| error.clone()));
-        self.health_error
-            .load_full()
-            .expect("health error must be recorded before registries close")
+    }
+
+    /// Publish the sticky healthy-to-unhealthy transition.
+    fn publish_unhealthy(&self) {
+        self.health_tx.send_if_modified(|healthy| {
+            if !*healthy {
+                return false;
+            }
+            *healthy = false;
+            true
+        });
     }
 
     /// Assert there is a recorded health error and return a `Shared` variant
@@ -461,13 +479,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_registries_records_first_health_error_only() {
         let inner = test_inner().await;
+        let mut health = inner.subscribe_health();
+        assert!(*health.borrow());
 
         inner.close_registries(Arc::new(Error::EngineCoreDead));
+        health.changed().await.expect("health sender remains open");
         assert!(!inner.is_healthy());
+        assert!(!*health.borrow());
         assert!(matches!(
             inner.health_error().as_deref(),
             Some(Error::EngineCoreDead)
         ));
+        assert!(!*inner.subscribe_health().borrow());
 
         inner.close_registries(Arc::new(client_closed!("shutdown")));
         assert!(matches!(
