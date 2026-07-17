@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -67,6 +68,127 @@ def test_sqrtsoftplus_bias_uses_deepseek_v4_routing_method():
         )
         == RoutingMethodType.Unspecified
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
+def test_fused_topk_softplus_sqrt_nan_inf_clamp(
+    bad_value: float,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(0)
+    num_tokens = 4
+    hidden_size = 1024
+    num_experts = 256
+    topk = 6
+    hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+    gating_output[1:, :] = bad_value
+
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=None,
+        topk=topk,
+        renormalize=True,
+    )
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output[:1],
+        topk=topk,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+    )
+    torch.testing.assert_close(topk_ids[:1], topk_ids_ref, atol=0, rtol=0)
+    torch.testing.assert_close(topk_weights[:1], topk_weights_ref, atol=2e-2, rtol=1e-2)
+
+    for row in range(1, num_tokens):
+        row_ids = topk_ids[row]
+        valid_ids = row_ids[(row_ids >= 0) & (row_ids < num_experts)]
+        assert valid_ids.unique().numel() == valid_ids.numel(), (
+            f"Row {row} has duplicate valid expert IDs {row_ids.tolist()} "
+            f"(bad_value={bad_value})"
+        )
+        invalid_mask = row_ids == -1
+        assert torch.isfinite(topk_weights[row]).all(), (
+            f"Row {row} has non-finite weights {topk_weights[row].tolist()} "
+            f"(bad_value={bad_value})"
+        )
+        assert (topk_weights[row][invalid_mask] == 0).all(), (
+            f"Row {row} has non-zero sentinel weights "
+            f"{topk_weights[row].tolist()} (bad_value={bad_value})"
+        )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
+def test_fused_topk_softplus_sqrt_hash_nan_inf_clamp(
+    bad_value: float,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(0)
+    num_tokens = 4
+    hidden_size = 1024
+    num_experts = 256
+    topk = 6
+    vocab_size = 32
+    hidden_states = torch.randn((num_tokens, hidden_size), dtype=dtype, device="cuda")
+    gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+    gating_output[1:, :] = bad_value
+    hash_indices_table = torch.stack(
+        [
+            (torch.arange(topk, dtype=torch.int64) + token_id) % num_experts
+            for token_id in range(vocab_size)
+        ]
+    ).to(device="cuda")
+    input_ids = torch.arange(num_tokens, dtype=torch.int64, device="cuda")
+
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="sqrtsoftplus",
+        e_score_correction_bias=None,
+        topk=topk,
+        renormalize=True,
+        indices_type=torch.int64,
+        input_tokens=input_ids,
+        hash_indices_table=hash_indices_table,
+    )
+
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output[:1],
+        topk=topk,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        input_ids=input_ids[:1],
+        hash_indices_table=hash_indices_table,
+    )
+    torch.testing.assert_close(
+        topk_ids[:1], topk_ids_ref.to(topk_ids.dtype), atol=0, rtol=0
+    )
+    torch.testing.assert_close(topk_weights[:1], topk_weights_ref, atol=2e-2, rtol=1e-2)
+
+    for row in range(1, num_tokens):
+        assert torch.equal(topk_ids[row], torch.full_like(topk_ids[row], -1)), (
+            f"Row {row} should contain only sentinel IDs (bad_value={bad_value})"
+        )
+        assert torch.isfinite(topk_weights[row]).all(), (
+            f"Row {row} has non-finite weights {topk_weights[row].tolist()} "
+            f"(bad_value={bad_value})"
+        )
+        assert (topk_weights[row] == 0).all(), (
+            f"Row {row} has non-zero weights {topk_weights[row].tolist()} "
+            f"(bad_value={bad_value})"
+        )
 
 
 @pytest.mark.skipif(
@@ -185,4 +307,109 @@ def test_fused_topk_softplus_sqrt_hash(
 
     sorted_w_ref = topk_weights_ref.gather(1, idx_ref)
     sorted_w = topk_weights.gather(1, idx_ops)
+    torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("use_hash", [False, True])
+@pytest.mark.parametrize("use_bias", [False, True])
+@pytest.mark.parametrize("num_experts", [128, 256, 384])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half, torch.float32])
+def test_fused_topk_softplus_sqrt_padding(
+    use_hash: bool,
+    use_bias: bool,
+    num_experts: int,
+    dtype: torch.dtype,
+):
+    """Padding rows (is_padding=True) must be dropped: all topk_ids forced to
+    the -1 sentinel and all weights zeroed, while non-pad rows are unaffected.
+    """
+    torch.manual_seed(0)
+    num_tokens = 8
+    topk = 6
+    indices_dtype = torch.int32
+
+    gating_output = torch.randn((num_tokens, num_experts), dtype=dtype, device="cuda")
+
+    # Pad every other row so the kernel must handle a mix of pad/real rows
+    # within the same warp.
+    is_padding = torch.zeros(num_tokens, dtype=torch.bool, device="cuda")
+    is_padding[1::2] = True
+
+    # Use a *negative* correction bias on purpose. A pad row keeps row_chunk==0
+    # (softplus/sqrt is skipped) and the kernel then subtracts the bias, giving
+    # a post-bias score of `0 - bias > 0`. That makes `has_valid_score` True for
+    # pad rows, so the drop has to come from the explicit `!is_pad_row` guard.
+    e_score_correction_bias = None
+    if use_bias:
+        e_score_correction_bias = (
+            -torch.rand((num_experts,), dtype=torch.float32, device="cuda") - 1.0
+        )
+
+    input_ids = None
+    hash_indices_table = None
+    if use_hash:
+        vocab_size = 64
+        hash_indices_table = torch.stack(
+            [torch.randperm(num_experts)[:topk] for _ in range(vocab_size)]
+        ).to(device="cuda", dtype=indices_dtype)
+        input_ids = torch.randint(
+            0, vocab_size, (num_tokens,), dtype=indices_dtype, device="cuda"
+        )
+
+    topk_weights = torch.empty(num_tokens, topk, dtype=torch.float32, device="cuda")
+    topk_ids = torch.empty(num_tokens, topk, dtype=indices_dtype, device="cuda")
+    token_expert_indices = torch.empty(
+        num_tokens, topk, dtype=torch.int32, device="cuda"
+    )
+
+    ops.topk_hash_softplus_sqrt(
+        topk_weights,
+        topk_ids,
+        token_expert_indices,
+        gating_output,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        e_score_correction_bias=e_score_correction_bias,
+        input_tokens=input_ids,
+        hash_indices_table=hash_indices_table,
+        is_padding=is_padding,
+    )
+
+    # Pad rows: every id must be the -1 sentinel and every weight zero.
+    for row in range(num_tokens):
+        if not is_padding[row]:
+            continue
+        assert torch.equal(topk_ids[row], torch.full_like(topk_ids[row], -1)), (
+            f"Pad row {row} should contain only -1 ids, got {topk_ids[row].tolist()}"
+        )
+        assert (topk_weights[row] == 0).all(), (
+            f"Pad row {row} should have all-zero weights, "
+            f"got {topk_weights[row].tolist()}"
+        )
+
+    # Non-pad rows must be unaffected by the presence of pad rows: compare
+    # against the reference computed over the full batch.
+    topk_weights_ref, topk_ids_ref = _torch_topk_softplus_sqrt(
+        gating_output=gating_output,
+        topk=topk,
+        renormalize=True,
+        routed_scaling_factor=1.0,
+        e_score_correction_bias=e_score_correction_bias,
+        input_ids=input_ids,
+        hash_indices_table=hash_indices_table,
+    )
+
+    non_pad = ~is_padding
+    sorted_ref_ids, idx_ref = topk_ids_ref[non_pad].sort(dim=-1)
+    sorted_ids, idx_ops = topk_ids[non_pad].sort(dim=-1)
+    torch.testing.assert_close(
+        sorted_ref_ids, sorted_ids.to(sorted_ref_ids.dtype), atol=0, rtol=0
+    )
+
+    sorted_w_ref = topk_weights_ref[non_pad].gather(1, idx_ref)
+    sorted_w = topk_weights[non_pad].gather(1, idx_ops)
     torch.testing.assert_close(sorted_w_ref, sorted_w, atol=2e-2, rtol=1e-2)
