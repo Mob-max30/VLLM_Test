@@ -13,6 +13,7 @@ from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     ReqContext,
@@ -97,7 +98,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
-    medium: ClassVar[str] = MEDIUM_OBJ
+    event_medium: ClassVar[str] = MEDIUM_OBJ
+    filter_medium: ClassVar[Medium | None] = Medium.STORAGE
 
     def __init__(
         self,
@@ -262,6 +264,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        if self.filter_medium is not None and not req_context.load_tier_filter.allows(
+            self.filter_medium
+        ):
+            return LookupResult.MISS
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:
             return LookupResult.RETRY
@@ -323,7 +329,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 keys = self._store_job_keys.pop(result.job_id, None)
                 if result.success and keys:
                     self.events.append(
-                        OffloadingEvent(keys=keys, medium=self.medium, removed=False)
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.event_medium,
+                            removed=False,
+                        )
                     )
         return results
 

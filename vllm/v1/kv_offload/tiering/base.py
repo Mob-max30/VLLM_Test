@@ -7,12 +7,13 @@ Abstract interfaces and data types for the secondary tiering layer.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadingMetricMetadata,
     OffloadKey,
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
         OffloadingConnectorStats,
     )
     from vllm.v1.kv_offload.base import OffloadingSpec
+
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
@@ -107,6 +109,8 @@ class SecondaryTierManager(ABC):
     lightweight and non-blocking. submit_load() and submit_store() submit
     async jobs; get_finished_jobs() polls for completion.
     """
+
+    filter_medium: ClassVar[Medium | None] = None
 
     def __init__(
         self,

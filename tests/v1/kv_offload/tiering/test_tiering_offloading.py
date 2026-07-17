@@ -20,8 +20,12 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    KV_LOAD_TIERS_KEY,
+)
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    Medium,
     OffloadingCounterMetadata,
     OffloadingEvent,
     OffloadKey,
@@ -29,6 +33,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
+    TierFilter,
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.base import (
@@ -972,6 +977,47 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.drain_jobs.assert_called_once()
         self.secondary_tier2.drain_jobs.assert_called_once()
         assert self.manager._transfer_jobs == {}
+
+    def test_tier_filter_skips_filtered_secondary(self, manager_setup):
+        """Filter excluding secondary medium returns MISS from secondaries
+        even when they hold the block; primary is unaffected."""
+        blocks = to_keys(range(2))
+        # Put one block in primary, one only in secondary
+        self._start_request()
+        self.manager.prepare_store(blocks[:1], _CTX)
+        self.manager.complete_store(blocks[:1], _CTX, success=True)
+        self.secondary_tier1.blocks[blocks[1]] = True
+
+        # Filter allows only STORAGE; secondaries have medium=CPU
+        ctx = ReqContext(
+            req_id="r1",
+            kv_transfer_params={KV_LOAD_TIERS_KEY: [{"medium": Medium.STORAGE.value}]},
+            load_tier_filter=TierFilter(matchers=({"medium": Medium.STORAGE.value},)),
+        )
+        assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT
+        assert self.manager.lookup(blocks[1], ctx) is LookupResult.MISS
+
+    @pytest.mark.parametrize(
+        "load_tier_filter",
+        [
+            TierFilter.ALL,
+            TierFilter(matchers=({"medium": Medium.CPU.value},)),
+            TierFilter(matchers=({},)),
+        ],
+        ids=["all", "explicit_cpu", "unconstrained_matcher"],
+    )
+    def test_tier_filter_allows_matching_secondary(
+        self, manager_setup, load_tier_filter
+    ):
+        """Filter that matches the secondary's medium allows lookup."""
+        blocks = to_keys(range(1))
+        self.secondary_tier1.blocks[blocks[0]] = True
+
+        self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
+
+        ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
+        assert self.manager.lookup(blocks[0], ctx) is LookupResult.RETRY
+        self.secondary_tier1.lookup.assert_called()
 
 
 class TestTieringOffloadingWithoutSecondaryTiers:
