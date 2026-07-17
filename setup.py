@@ -503,13 +503,14 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def fetch_metadata_for_variant(
-        commit: str, variant: str | None
+        commit: str, variant: str | None, *, rocm: bool = False
     ) -> tuple[list[dict], str]:
         """
         Fetches metadata for a specific variant of the precompiled wheel.
         """
         variant_dir = f"{variant}/" if variant is not None else ""
-        repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
+        commit_prefix = f"rocm/{commit}" if rocm else commit
+        repo_url = f"https://wheels.vllm.ai/{commit_prefix}/{variant_dir}vllm/"
         meta_url = repo_url + "metadata.json"
         print(f"Trying to fetch nightly build metadata from {meta_url}")
         from urllib.request import urlopen
@@ -518,6 +519,29 @@ class precompiled_wheel_utils:
             # urlopen raises HTTPError on unexpected status code
             wheels = json.loads(resp.read().decode("utf-8"))
         return wheels, repo_url
+
+    @staticmethod
+    def select_vllm_wheel_from_metadata(
+        wheels: list[dict], repo_url: str, arch: str
+    ) -> tuple[str, str | None]:
+        from urllib.parse import urljoin
+
+        for wheel in wheels:
+            # TODO: maybe check more compatibility later? (python_tag, abi_tag, etc)
+            if wheel.get("package_name") == "vllm" and arch in wheel.get(
+                "platform_tag", ""
+            ):
+                print(f"Found precompiled wheel metadata: {wheel}")
+                if "path" not in wheel:
+                    raise ValueError(f"Wheel metadata missing path: {wheel}")
+                wheel_url = urljoin(repo_url, wheel["path"])
+                download_filename = wheel.get("filename")
+                print(f"Using precompiled wheel URL: {wheel_url}")
+                return wheel_url, download_filename
+        raise ValueError(
+            f"No precompiled vllm wheel found for architecture {arch} "
+            f"from repo {repo_url}. All available wheels: {wheels}"
+        )
 
     @staticmethod
     def is_rocm_system() -> bool:
@@ -629,13 +653,48 @@ class precompiled_wheel_utils:
     @staticmethod
     def determine_wheel_url_rocm() -> tuple[str, str | None]:
         """Determine the precompiled wheel for ROCm."""
-        # Search for local wheel first
         local_wheel = precompiled_wheel_utils.find_local_rocm_wheel()
         if local_wheel is not None:
             print(f"Found local ROCm wheel: {local_wheel}")
             return local_wheel, None
 
-        # Fall back to AMD's PyPI index
+        import platform
+
+        arch = platform.machine()
+        variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None)
+        commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
+        if not commit or len(commit) != 40:
+            print(
+                f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}"
+                ", trying to fetch base commit in main branch"
+            )
+            commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+        print(f"Using precompiled ROCm wheel commit {commit} with variant {variant}")
+        try_default = False
+        wheels, repo_url = None, None
+        try:
+            wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                commit, variant, rocm=True
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch ROCm precompiled wheel metadata for variant %s: %s",
+                variant,
+                e,
+            )
+            try_default = True
+        if try_default:
+            print("Trying the default ROCm variant from remote")
+            wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                commit, None, rocm=True
+            )
+        try:
+            return precompiled_wheel_utils.select_vllm_wheel_from_metadata(
+                wheels, repo_url, arch
+            )
+        except ValueError as e:
+            logger.warning("Failed to resolve ROCm wheel from wheels.vllm.ai: %s", e)
+
         index_url = os.getenv(
             "VLLM_ROCM_WHEEL_INDEX", "https://pypi.amd.com/vllm-rocm/simple"
         )
@@ -665,8 +724,6 @@ class precompiled_wheel_utils:
             print(f"Using user-specified precompiled wheel location: {wheel_location}")
             return wheel_location, None
         else:
-            # ROCm: use local wheel or AMD's PyPI index
-            # TODO: When we have ROCm nightly wheels, we can update this logic.
             if precompiled_wheel_utils.is_rocm_system():
                 return precompiled_wheel_utils.determine_wheel_url_rocm()
 
@@ -708,41 +765,9 @@ class precompiled_wheel_utils:
             assert wheels is not None and repo_url is not None, (
                 "Failed to fetch precompiled wheel metadata"
             )
-            # The metadata.json has the following format:
-            # see .buildkite/scripts/generate-nightly-index.py for details
-            """[{
-    "package_name": "vllm",
-    "version": "0.11.2.dev278+gdbc3d9991",
-    "build_tag": null,
-    "python_tag": "cp38",
-    "abi_tag": "abi3",
-    "platform_tag": "manylinux1_x86_64",
-    "variant": null,
-    "filename": "vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl",
-    "path": "../vllm-0.11.2.dev278%2Bgdbc3d9991-cp38-abi3-manylinux1_x86_64.whl"
-    },
-    ...]"""
-            from urllib.parse import urljoin
-
-            for wheel in wheels:
-                # TODO: maybe check more compatibility later? (python_tag, abi_tag, etc)
-                if wheel.get("package_name") == "vllm" and arch in wheel.get(
-                    "platform_tag", ""
-                ):
-                    print(f"Found precompiled wheel metadata: {wheel}")
-                    if "path" not in wheel:
-                        raise ValueError(f"Wheel metadata missing path: {wheel}")
-                    wheel_url = urljoin(repo_url, wheel["path"])
-                    download_filename = wheel.get("filename")
-                    print(f"Using precompiled wheel URL: {wheel_url}")
-                    break
-            else:
-                raise ValueError(
-                    f"No precompiled vllm wheel found for architecture {arch} "
-                    f"from repo {repo_url}. All available wheels: {wheels}"
-                )
-
-        return wheel_url, download_filename
+            return precompiled_wheel_utils.select_vllm_wheel_from_metadata(
+                wheels, repo_url, arch
+            )
 
     @staticmethod
     def extract_precompiled_and_patch_package(
