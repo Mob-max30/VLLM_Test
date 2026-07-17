@@ -30,7 +30,9 @@ fi
 # for the given commit is still being built in the release pipeline
 _vllm_target_lower="$(printf '%s' "${VLLM_TARGET_DEVICE:-}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${_vllm_target_lower}" == "rocm" ]] || [[ -d /opt/rocm ]] || command -v rocminfo >/dev/null 2>&1; then
-    meta_json_url="https://wheels.vllm.ai/rocm/${merge_base_commit}/vllm/metadata.json"
+    _rocm_variant="${VLLM_PRECOMPILED_WHEEL_VARIANT:-rocm723}"
+    meta_json_url="https://wheels.vllm.ai/rocm/${merge_base_commit}/${_rocm_variant}/vllm/metadata.json"
+    unset -v _rocm_variant
 else
     meta_json_url="https://wheels.vllm.ai/${merge_base_commit}/vllm/metadata.json"
 fi

@@ -580,6 +580,21 @@ class precompiled_wheel_utils:
         return variant
 
     @staticmethod
+    def detect_system_rocm_variant() -> str:
+        dockerfile = ROOT_DIR / "docker" / "Dockerfile.rocm_base"
+        try:
+            for line in dockerfile.read_text().splitlines():
+                if line.startswith("ARG BASE_IMAGE="):
+                    if m := re.search(r":(\d+\.\d+\.\d+)", line):
+                        variant = "rocm" + m.group(1).replace(".", "")
+                        print(f"Detected ROCm variant {variant} from Dockerfile.rocm_base")
+                        return variant
+        except OSError:
+            pass
+        print("Using default ROCm variant rocm723")
+        return "rocm723"
+
+    @staticmethod
     def find_local_rocm_wheel() -> str | None:
         """Search for a local vllm wheel in common locations."""
         import glob
@@ -639,7 +654,8 @@ class precompiled_wheel_utils:
         import platform
 
         arch = platform.machine()
-        variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None)
+        default_variant = precompiled_wheel_utils.detect_system_rocm_variant()
+        variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None) or default_variant
         commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
         if not commit or len(commit) != 40:
             print(
@@ -648,24 +664,19 @@ class precompiled_wheel_utils:
             )
             commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
         print(f"Using precompiled ROCm wheel commit {commit} with variant {variant}")
-        try_default = False
         wheels, repo_url = None, None
-        try:
-            wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                commit, variant, rocm=True
-            )
-        except Exception as e:
-            logger.warning(
-                "Failed to fetch ROCm precompiled wheel metadata for variant %s: %s",
-                variant,
-                e,
-            )
-            try_default = True
-        if try_default:
-            print("Trying the default ROCm variant from remote")
-            wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                commit, None, rocm=True
-            )
+        for try_variant in dict.fromkeys([variant, default_variant]):
+            try:
+                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                    commit, try_variant, rocm=True
+                )
+                break
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch ROCm precompiled wheel metadata for variant %s: %s",
+                    try_variant,
+                    e,
+                )
         if wheels is not None and repo_url is not None:
             from urllib.parse import urljoin
 
