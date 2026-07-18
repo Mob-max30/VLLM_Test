@@ -10,6 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.model import LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.rocm import on_gfx1250
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
@@ -110,6 +111,7 @@ class TopKTopPSampler(nn.Module):
         elif (
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and rocm_aiter_ops.is_enabled()
+            and not on_gfx1250()  # TODO (JPVILLAM): Enable this path
         ):
             self.aiter_ops = None
             self._aiter_ops_import_failed = False

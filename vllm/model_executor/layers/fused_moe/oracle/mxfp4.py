@@ -222,11 +222,14 @@ def backend_to_kernel_cls(
         return [BatchedMarlinExperts]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
+            AiterW4A16ExpertsMonolithic,
+        )
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
-        return [AiterExperts]
+        return [AiterExperts, AiterW4A16ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
@@ -978,6 +981,22 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
+        import vllm.envs as envs
+
+        if envs.VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4:
+            # Triton moe_gemm_a4w4 path (e.g. gfx1250): the CK e8m0_shuffle /
+            # shuffle_weights below are the wrong layout for the Triton kernel,
+            # which consumes native [E, 2*inter, hidden/2] uint8 weights with
+            # unshuffled scales and maps layout internally. Return untransformed.
+            return (
+                w13_weight,
+                w2_weight,
+                w13_weight_scale,
+                w2_weight_scale,
+                w13_bias,
+                w2_bias,
+            )
+
         # e8m0_shuffle on weight scales (GFX950 swizzle layout)
         from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -1268,6 +1287,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
     Supports DeepGEMM, TRTLLM MXFP8, Triton and Marlin backends.
     """
+    from vllm.platforms.rocm import on_gfx1250
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
@@ -1440,7 +1460,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and not on_gfx1250():
         # Initially introduced for DeepSeekV4
 
         if w13_bias is not None:
@@ -1497,7 +1517,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    elif mxfp4_backend in TRITON_BACKENDS:
+    elif mxfp4_backend in TRITON_BACKENDS or (
+        mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and on_gfx1250()
+    ):
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
         if mxfp4_backend == Mxfp4MoeBackend.TRITON:
