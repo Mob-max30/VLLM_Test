@@ -677,7 +677,8 @@ __global__ void grouped_topk_fused_kernel(
 
 template <typename T, typename BiasT, typename IdxT, ScoringFunc SF,
           int MaxNumExperts, bool UseGroups,
-          int MaxNumTopExperts = DefaultMaxNumTopExperts>
+          int MaxNumTopExperts = DefaultMaxNumTopExperts,
+          bool UseMaxGroupScore = false>
 __global__ void grouped_topk_fused_small_expert_count_kernel(
     T* scores, float* topkValues, IdxT* topkIndices, BiasT const* routingBias,
     int64_t const numTokens, int64_t const numGroup, int64_t const topkGroup,
@@ -762,7 +763,11 @@ __global__ void grouped_topk_fused_small_expert_count_kernel(
 
     // get the final group score and write it to shared
     if (warp.thread_rank() == 0) {
-      auto groupScore = topExpGroupScores[0] + topExpGroupScores[1];
+      // UseMaxGroupScore=true: max-per-group (Mistral-style, no bias).
+      // UseMaxGroupScore=false: sum of top-2 per group (DeepSeek-V3-style).
+      auto groupScore = UseMaxGroupScore
+                            ? topExpGroupScores[0]
+                            : topExpGroupScores[0] + topExpGroupScores[1];
       smemGroupScores[warpIdx] = groupScore;
     }
   }
@@ -897,7 +902,8 @@ void invokeNoAuxTc(T* scores, float* topk_values, IdxT* topk_indices,
                    int64_t const topk_group, int64_t const topk,
                    bool const renormalize, double const routed_scaling_factor,
                    const bool enable_pdl = false,
-                   cudaStream_t const stream = 0) {
+                   cudaStream_t const stream = 0,
+                   bool use_max_group_score = false) {
   cudaLaunchConfig_t config;
   config.stream = stream;
   cudaLaunchAttribute attrs[1];
@@ -919,6 +925,23 @@ void invokeNoAuxTc(T* scores, float* topk_values, IdxT* topk_indices,
       (experts_per_group <= WARP_SIZE) &&
       (experts_per_group * topk_group <= MaxNumExpertsUnit) &&
       (topk <= DefaultMaxNumTopExperts) && (topk_group <= MaxNumTopGroups);
+
+  if (use_max_group_score && is_multi_group) {
+    // Max-per-group scoring path (Mistral-style: no bias, softmax scores).
+    // Only valid for multi-group configs; single-group doesn't need it and
+    // the fallback kernel doesn't implement it.
+    auto* kern = &grouped_topk_fused_small_expert_count_kernel<
+        T, BiasT, IdxT, SF, NumDeepseekExperts, true, DefaultMaxNumTopExperts,
+        true>;
+    config.gridDim = num_tokens;
+    config.blockDim = NumDeepseekExperts;
+    config.dynamicSmemBytes = 0;
+    cudaLaunchKernelEx(&config, kern, scores, topk_values, topk_indices, bias,
+                       num_tokens, n_group, topk_group, topk, num_experts,
+                       num_experts / n_group, renormalize,
+                       routed_scaling_factor);
+    return;
+  }
 
   if (is_single_group || is_multi_group) {
     auto* kernel_instance =
@@ -985,7 +1008,8 @@ void invokeNoAuxTc(T* scores, float* topk_values, IdxT* topk_indices,
       int64_t const num_tokens, int64_t const num_experts,                   \
       int64_t const n_group, int64_t const topk_group, int64_t const topk,   \
       bool const renormalize, double const routed_scaling_factor,            \
-      const bool enable_pdl, cudaStream_t const stream);
+      const bool enable_pdl, cudaStream_t const stream,                      \
+      bool use_max_group_score);
 
 INSTANTIATE_NOAUX_TC(float, float, int32_t, SCORING_SIGMOID);
 INSTANTIATE_NOAUX_TC(float, half, int32_t, SCORING_SIGMOID);
@@ -1011,7 +1035,8 @@ INSTANTIATE_NOAUX_TC(__nv_bfloat16, __nv_bfloat16, int32_t, SCORING_NONE);
 std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
     torch::stable::Tensor const& scores, int64_t n_group, int64_t topk_group,
     int64_t topk, bool renormalize, double routed_scaling_factor,
-    torch::stable::Tensor const& bias, int64_t scoring_func = 0) {
+    torch::stable::Tensor const& bias, int64_t scoring_func = 0,
+    int64_t group_scoring_func = 0) {
   const auto data_type = scores.scalar_type();
   const auto bias_type = bias.scalar_type();
   STD_TORCH_CHECK(scores.dim() == 2, "scores must be a 2D Tensor");
@@ -1033,6 +1058,9 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
       scoring_func == vllm::moe::SCORING_NONE ||
           scoring_func == vllm::moe::SCORING_SIGMOID,
       "scoring_func must be SCORING_NONE (0) or SCORING_SIGMOID (1)");
+  STD_TORCH_CHECK(group_scoring_func == 0 || group_scoring_func == 1,
+                  "group_scoring_func must be 0 (top2) or 1 (max)");
+  bool const use_max_group_score = (group_scoring_func == 1);
 
   // Always output float32 for topk_values (eliminates Python-side conversion)
   auto topk_values = torch::stable::new_empty(
@@ -1057,7 +1085,8 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), num_tokens,      \
             num_experts, n_group, topk_group, topk, renormalize,              \
-            routed_scaling_factor, pdl_flag, stream);                         \
+            routed_scaling_factor, pdl_flag, stream,                          \
+            use_max_group_score);                                             \
         break;                                                                \
       case vllm::moe::SCORING_SIGMOID:                                        \
         vllm::moe::invokeNoAuxTc<T, BiasT, IdxT, vllm::moe::SCORING_SIGMOID>( \
@@ -1066,7 +1095,8 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), num_tokens,      \
             num_experts, n_group, topk_group, topk, renormalize,              \
-            routed_scaling_factor, pdl_flag, stream);                         \
+            routed_scaling_factor, pdl_flag, stream,                          \
+            use_max_group_score);                                             \
         break;                                                                \
       default:                                                                \
         STD_TORCH_CHECK(false, "Unsupported scoring_func");                   \
