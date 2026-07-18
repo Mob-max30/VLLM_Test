@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from unittest import mock
+
 import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils import jit_monitor
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
@@ -86,6 +89,71 @@ def ref_paged_attn(
         start_idx += query_len
 
     return torch.cat(outputs, dim=0)
+
+
+@pytest.mark.skipif(DEVICE_TYPE not in ("cuda", "rocm"), reason="Requires Triton")
+@torch.inference_mode()
+def test_mm_prefix_range_count_does_not_recompile() -> None:
+    """Changing the runtime range count must not create a Triton specialization."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_heads = 4
+    num_kv_heads = 4
+    head_size = 128
+    block_size = 16
+    kv_len = 32
+    scale = head_size**-0.5
+    query = torch.randn(1, num_heads, head_size, dtype=torch.bfloat16)
+    key_cache = torch.randn(
+        4, block_size, num_kv_heads, head_size, dtype=torch.bfloat16
+    )
+    value_cache = torch.randn_like(key_cache)
+    output = torch.empty_like(query)
+    cu_query_lens = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([kv_len], dtype=torch.int32)
+    block_tables = torch.tensor([[0, 1]], dtype=torch.int32)
+    softmax_segm_output = torch.empty(
+        (0, num_heads, 16, head_size), dtype=torch.float32
+    )
+    softmax_segm_max = torch.empty((0, num_heads, 16), dtype=torch.float32)
+    softmax_segm_expsum = torch.empty((0, num_heads, 16), dtype=torch.float32)
+
+    def run(mm_prefix_range: torch.Tensor) -> torch.Tensor:
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=seq_lens,
+            max_seqlen_q=1,
+            max_seqlen_k=kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=(-1, -1),
+            block_table=block_tables,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            mm_prefix_range=mm_prefix_range,
+            seq_threshold_3D=0,
+            num_par_softmax_segments=16,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+        )
+        return output.clone()
+
+    output_one_range = run(torch.tensor([[[0, 0], [1, 0], [2, 0]]], dtype=torch.int32))
+    jit_monitor.activate()
+    with mock.patch.object(jit_monitor.logger, "warning_once") as warning:
+        output_two_ranges = run(
+            torch.tensor([[[0, 0], [1, 0], [2, 0], [3, 0]]], dtype=torch.int32)
+        )
+    warning.assert_not_called()
+    torch.testing.assert_close(output_one_range, output_two_ranges)
 
 
 @pytest.mark.parametrize(
