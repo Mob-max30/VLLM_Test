@@ -80,7 +80,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsXDRoPE,
-    is_mixture_of_experts,
+    get_mixture_of_experts_model,
     supports_eagle3,
     supports_mrope,
     supports_multimodal_pruning,
@@ -3391,10 +3391,12 @@ class GPUModelRunner(
         expanded_physical_to_logical: torch.Tensor,
         old_num_physical_experts: int,
     ) -> None:
-        assert self._moe_model is not None
+        model = self.get_model()
+        moe_model = get_mixture_of_experts_model(model)
+        assert moe_model is not None
 
         self.eplb_state = EplbState.from_mapping(
-            model=self._moe_model,
+            model=moe_model,
             model_config=self.model_config,
             device=self.device,
             parallel_config=self.parallel_config,
@@ -5275,9 +5277,14 @@ class GPUModelRunner(
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
                     if (
-                        hasattr(self.drafter, "model")
-                        and is_mixture_of_experts(self.drafter.model)
-                        and self.parallel_config.enable_eplb
+                        self.parallel_config.enable_eplb
+                        and hasattr(self.drafter, "model")
+                        and (
+                            drafter_moe_model := get_mixture_of_experts_model(
+                                self.drafter.model
+                            )
+                        )
+                        is not None
                     ):
                         assert not self.parallel_config.enable_elastic_ep, (
                             "Elastic EP is not supported with drafter model."
@@ -5286,7 +5293,7 @@ class GPUModelRunner(
                         assert spec_config is not None
                         assert spec_config.draft_model_config is not None
                         logger.info_once(
-                            "EPLB is enabled for drafter model %s.",
+                            "EPLB is enabled for MoE part of drafter model %s.",
                             spec_config.draft_model_config.model,
                         )
                         if self.eplb_state is None:
@@ -5294,7 +5301,7 @@ class GPUModelRunner(
                                 self.parallel_config, self.device
                             )
                         self.eplb_state.add_model(
-                            self.drafter.model,
+                            drafter_moe_model,
                             spec_config.draft_model_config,
                         )
                         assert hasattr(self.drafter, "set_eplb_state")
@@ -5307,26 +5314,21 @@ class GPUModelRunner(
                 # VLM models (e.g. KimiK25ForConditionalGeneration) wrap the
                 # actual MoE language model but don't implement
                 # MixtureOfExperts themselves.
-                moe_candidate = self.model
-                if not is_mixture_of_experts(moe_candidate) and isinstance(
-                    moe_candidate, SupportsMultiModal
-                ):
-                    moe_candidate = moe_candidate.get_language_model()
-                if is_mixture_of_experts(moe_candidate):
-                    self._moe_model = moe_candidate
+                self._moe_model = get_mixture_of_experts_model(self.model)
 
                 if (
-                    self._moe_model is not None
-                    and self.parallel_config.enable_eplb
+                    self.parallel_config.enable_eplb
                     and not load_dummy_weights
+                    and (moe_model := get_mixture_of_experts_model(self.model))
+                    is not None
                 ):
                     logger.info_once(
-                        "EPLB is enabled for model %s.",
+                        "EPLB is enabled for MoE part of model %s.",
                         self.model_config.model,
                     )
                     assert self.eplb_state is not None
                     self.eplb_state.add_model(
-                        self._moe_model,
+                        moe_model,
                         self.model_config,
                     )
                     eplb_models += 1
@@ -5366,8 +5368,8 @@ class GPUModelRunner(
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet
 
         if (
-            self._moe_model is not None
-            and self.parallel_config.enable_eplb
+            self.parallel_config.enable_eplb
+            and get_mixture_of_experts_model(self.model) is not None
             and not load_dummy_weights
             and self.eplb_state is not None
             and self.eplb_state.is_async
