@@ -966,6 +966,23 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
+def _all_groups_uniform_type(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
+    """Whether every group holds a UniformTypeKVCacheSpecs."""
+    return all(
+        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
+    )
+
+
+def _iter_uniform_layer_specs(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> Iterator[tuple[str, KVCacheSpec]]:
+    """Yield (layer_name, spec) for all layers of UniformTypeKVCacheSpecs groups."""
+    for group in kv_cache_groups:
+        spec = group.kv_cache_spec
+        assert isinstance(spec, UniformTypeKVCacheSpecs)
+        yield from spec.kv_cache_specs.items()
+
+
 def _pool_bytes_per_block(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
 ) -> int:
@@ -975,14 +992,16 @@ def _pool_bytes_per_block(
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    if len(kv_cache_groups) == 1 and isinstance(
-        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
-    ):
-        return kv_cache_groups[0].kv_cache_spec.page_size_bytes
     if _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
         # buckets = {page_size: [[layer_names], [layer_names], ...]}
         buckets = _bucket_layers_by_page_size(kv_cache_groups)
         return sum(ps * len(slots) for ps, slots in buckets.items())
+    if _all_groups_uniform_type(kv_cache_groups):
+        # One tensor per layer, so one pool block holds one block of every layer.
+        return sum(
+            spec.page_size_bytes
+            for _, spec in _iter_uniform_layer_specs(kv_cache_groups)
+        )
     group_size = max(len(g.layer_names) for g in kv_cache_groups)
     page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
     return page_size * group_size
@@ -1286,9 +1305,16 @@ def _use_packed_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> bool:
-    is_dsv4 = all(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for group in kv_cache_groups
+    # The packed cross-layer layout gives each layer a strided view; only
+    # DeepseekV4's kernels consume that. Identify it by model_version, as
+    # elsewhere. A single group never needs packing.
+    is_dsv4 = (
+        len(kv_cache_groups) > 1
+        and _all_groups_uniform_type(kv_cache_groups)
+        and any(
+            getattr(spec, "model_version", None) == "deepseek_v4"
+            for _, spec in _iter_uniform_layer_specs(kv_cache_groups)
+        )
     )
     kv_transfer_config = vllm_config.kv_transfer_config
     extra_config = (
@@ -1368,30 +1394,24 @@ def get_kv_cache_config_from_groups(
         )
 
     # Determine how model runners should initialize the KV cache tensors.
-    if len(kv_cache_groups) == 1 and isinstance(
-        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
-    ):
-        # Special case: all layers have the same type of KV cache but with
-        # different hidden sizes. Allocate different amount of memory for each
-        # layer based on its hidden size.
-        num_blocks = (
-            available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
-        )
-        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-        per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
-        kv_cache_tensors = [
-            KVCacheTensor(
-                size=per_layer_specs[layer_name].page_size_bytes * num_blocks,
-                shared_by=[layer_name],
-            )
-            for layer_name in kv_cache_groups[0].layer_names
-        ]
-    elif _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
+    if _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
         # DeepSeek V4 uses the packed layout by default. Other multi-group
         # layouts can opt in with --enable-cross-layers.
         num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
             vllm_config, kv_cache_groups, available_memory
         )
+    elif _all_groups_uniform_type(kv_cache_groups):
+        # Give each layer its own contiguous tensor sized by its page, sharing
+        # one num_blocks. Covers same-type layers with different hidden sizes
+        # (one group) and MLA-plus-draft hybrids whose pages differ (multiple).
+        num_blocks = may_override_num_blocks(
+            vllm_config,
+            available_memory // _pool_bytes_per_block(vllm_config, kv_cache_groups),
+        )
+        kv_cache_tensors = [
+            KVCacheTensor(size=spec.page_size_bytes * num_blocks, shared_by=[name])
+            for name, spec in _iter_uniform_layer_specs(kv_cache_groups)
+        ]
     else:
         # General case:
         # We will have group_size memory pools, each is shared by one layer from
@@ -1726,6 +1746,28 @@ def _annotate_eagle_groups_deepseek_v4(
             break
 
 
+def _group_hybrid_specs_by_type(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    """Group layers by attention type, one UniformTypeKVCacheSpecs per group.
+
+    For hybrids whose page sizes cannot be unified into a single block size
+    (e.g. an MLA model with a sparse indexer plus a non-MLA draft model). Each
+    group is allocated its own contiguous per-layer KV cache tensors.
+    """
+    by_type: dict[tuple[type | None, int], dict[str, KVCacheSpec]] = defaultdict(dict)
+    for name, spec in kv_cache_spec.items():
+        key = (KVCacheSpecRegistry.get_uniform_type_base_spec(spec), spec.block_size)
+        by_type[key][name] = spec
+
+    groups = []
+    for specs in by_type.values():
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+        assert uniform_spec is not None
+        groups.append(KVCacheGroupSpec(list(specs), uniform_spec))
+    return groups
+
+
 def get_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec]:
@@ -1765,6 +1807,15 @@ def get_kv_cache_groups(
         kv_cache_groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
         _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, kv_cache_groups)
         return kv_cache_groups
+    elif any(
+        isinstance(spec, MLAAttentionSpec)
+        and not isinstance(spec, HiddenStateCacheSpec)
+        for spec in kv_cache_spec.values()
+    ):
+        # An MLA model (e.g. with a sparse indexer) mixed with a non-MLA draft
+        # model: page sizes cannot be unified, so group by attention type and
+        # give each group its own contiguous per-layer tensors.
+        return _group_hybrid_specs_by_type(kv_cache_spec)
 
     # Pull HiddenStateCacheSpec layers out before the general multi-group
     # path so they don't affect page-size unification or grouping.
@@ -1844,24 +1895,10 @@ def _max_memory_usage_bytes_from_groups(
     if not kv_cache_groups:
         return 0
 
-    if len(kv_cache_groups) == 1 and isinstance(
-        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
-    ):
-        # UniformTypeKVCacheSpecs special case (single group, per-layer specs)
-        per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
-        return sum(
-            spec.max_memory_usage_bytes(vllm_config)
-            for spec in per_layer_specs.values()
-        )
-    elif all(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for group in kv_cache_groups
-    ):
-        # Special case (only DeepseekV4 for now): all groups are
-        # UniformTypeKVCacheSpecs.
-        # They must already be page_size aligned and share a common padded
-        # layer-tuple layout. Even groups with fewer actual tuples still reserve
-        # the global number of tuple slots in the shared tensor layout.
+    all_uniform = _all_groups_uniform_type(kv_cache_groups)
+    if all_uniform and _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
+        # DeepseekV4 packed layout: every group shares group 0's padded
+        # layer-tuple layout, reserving the global number of tuple slots.
         full_mla_spec = cast(UniformTypeKVCacheSpecs, kv_cache_groups[0].kv_cache_spec)
         layer_tuple_bytes = sum(full_mla_spec.get_page_sizes())
         num_layer_tuples = max(
@@ -1878,6 +1915,16 @@ def _max_memory_usage_bytes_from_groups(
             )
             total_max_mem_usage_bytes += g_max_mem_usage_page_bytes
         return total_max_mem_usage_bytes
+    elif all_uniform:
+        # Per-layer contiguous layout: the shared num_blocks must cover the
+        # group needing the most blocks.
+        max_pages = max(
+            cast(UniformTypeKVCacheSpecs, group.kv_cache_spec).max_memory_usage_pages(
+                vllm_config
+            )
+            for group in kv_cache_groups
+        )
+        return max_pages * _pool_bytes_per_block(vllm_config, kv_cache_groups)
 
     # General case: group_size pools, each shared by one layer per group
     # Memory = group_size * page_size * blocks_for_max_len
