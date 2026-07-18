@@ -120,6 +120,8 @@ class BlockTables:
             self.num_blocks.np[i, req_index] = start + len(block_ids)
 
     def apply_staged_writes(self) -> None:
+        if self.num_kv_cache_groups == 0:
+            return
         if self.num_kv_cache_groups == 1:
             # Single group: write directly, skipping the per-write group lookup.
             self.block_tables[0].apply_write()
@@ -136,6 +138,8 @@ class BlockTables:
         idx_mapping: torch.Tensor,
         num_reqs_padded: int,
     ) -> tuple[torch.Tensor, ...]:
+        if self.num_kv_cache_groups == 0:
+            return ()
         num_reqs = idx_mapping.shape[0]
         # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.
         _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs_padded)](
@@ -164,6 +168,8 @@ class BlockTables:
         positions: torch.Tensor,
         num_tokens_padded: int,
     ) -> torch.Tensor:
+        if self.num_kv_cache_groups == 0:
+            return self.slot_mappings[:, :num_tokens_padded]
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
