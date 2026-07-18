@@ -71,7 +71,7 @@ def test_deepseek_v4_shared_expert_fusion_guards(monkeypatch, guard):
     config = _make_fusion_config()
     monkeypatch.setattr(
         amd_model.rocm_aiter_ops,
-        "is_fused_moe_enabled",
+        "is_fusion_moe_shared_experts_enabled",
         lambda: guard != "aiter_moe",
     )
     monkeypatch.setattr(amd_model, "on_gfx950", lambda: guard != "gfx950")
@@ -110,7 +110,7 @@ def test_deepseek_v4_shared_expert_fusion_policy_accepts_supported_config(
     config = _make_fusion_config()
     monkeypatch.setattr(
         amd_model.rocm_aiter_ops,
-        "is_fused_moe_enabled",
+        "is_fusion_moe_shared_experts_enabled",
         lambda: True,
     )
     monkeypatch.setattr(amd_model, "on_gfx950", lambda: True)

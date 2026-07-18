@@ -124,15 +124,6 @@ def test_deepseek_v4_fused_shared_expert_is_appended_after_routing(monkeypatch):
     )
 
 
-def test_explicit_shared_expert_fusion_does_not_require_a_global_env_knob():
-    assert determine_expert_counts(
-        384, 0, 1, is_act_and_mul=True, enable_shared_expert_fusion=True
-    ) == (384, 384, 1)
-    assert determine_expert_counts(
-        384, 0, 1, is_act_and_mul=False, enable_shared_expert_fusion=True
-    ) == (384, 384, 0)
-
-
 def test_shared_expert_count_preserves_the_global_gate(monkeypatch):
     monkeypatch.setattr(
         "vllm.model_executor.layers.fused_moe.layer.rocm_aiter_ops."

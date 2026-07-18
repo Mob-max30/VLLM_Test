@@ -74,8 +74,8 @@ def _should_fuse_shared_expert(vllm_config: VllmConfig) -> bool:
 
     if not current_platform.is_rocm() or not on_gfx950():
         reasons.append("the device is not ROCm gfx950")
-    if not rocm_aiter_ops.is_fused_moe_enabled():
-        reasons.append("AITER fused MoE is not enabled")
+    if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+        reasons.append("AITER fused MoE and/or shared expert fusion is not enabled")
     if vllm_config.kernel_config.moe_backend != "aiter":
         reasons.append("the MoE backend is not AITER")
     if getattr(parallel_config, "enable_expert_parallel", False):
@@ -481,7 +481,6 @@ class DeepseekV4MoE(nn.Module):
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
             n_shared_experts=(config.n_shared_experts if fuse_shared_expert else None),
-            enable_shared_expert_fusion=fuse_shared_expert,
             routed_experts_cls=(
                 DeepseekV4FusedSharedRoutedExperts if fuse_shared_expert else None
             ),
