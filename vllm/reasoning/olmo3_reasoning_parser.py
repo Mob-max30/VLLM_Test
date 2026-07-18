@@ -317,4 +317,20 @@ class Olmo3ReasoningParser(ReasoningParser):
             # thinking tokens, and, if so, we reprocess the buffer again.
             delta_message = self.buffer.process_buffer()
 
+        # When a single delta carries the closing </think> *and* the content
+        # that follows it (e.g. with a stream interval > 1, or chunked
+        # prefill), process_buffer() emits only the reasoning and leaves the
+        # trailing content in the buffer. Because each delta triggers a single
+        # add_text() call, on the final delta that content would never be
+        # emitted and would be silently lost. Drain it and attach it to this
+        # delta, mirroring DeepSeek-R1, which returns the reasoning and the
+        # content together for a boundary-spanning delta.
+        if self.buffer.state == Olmo3ReasoningState.CONTENT and self.buffer.buffer:
+            trailing_content = self.buffer.buffer
+            self.buffer.buffer = ""
+            if delta_message is None:
+                delta_message = DeltaMessage(content=trailing_content)
+            else:
+                delta_message.content = (delta_message.content or "") + trailing_content
+
         return delta_message
