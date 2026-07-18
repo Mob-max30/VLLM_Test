@@ -43,6 +43,8 @@ from vllm.distributed.parallel_state import (
     Handle,
     get_pp_group,
     get_tp_group,
+    resume_device_comms,
+    suspend_device_comms,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -207,6 +209,11 @@ class Worker(WorkerBase):
 
         self._get_sleep_mode_backend().suspend(level)
 
+        # Release idle device communicator memory (e.g. NCCL >= 2.29.7).
+        # Collective across ranks; no-op where unsupported. Done after the
+        # cumem unmap so the reported freed bytes include the comm release.
+        suspend_device_comms()
+
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
         while True:
@@ -226,6 +233,10 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self._get_sleep_mode_backend().resume(tags)
+
+        # Restore device communicator memory before any collective runs again.
+        # Collective across ranks; no-op where unsupported.
+        resume_device_comms()
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):

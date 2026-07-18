@@ -322,6 +322,12 @@ class DeviceCommunicatorBase:
     def destroy(self):
         pass
 
+    def suspend(self) -> None:
+        """Release reclaimable communicator memory (default: no-op)."""
+
+    def resume(self) -> None:
+        """Restore memory released by ``suspend`` (default: no-op)."""
+
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module) -> None:
         """
         Prepare the communication buffer for the model.

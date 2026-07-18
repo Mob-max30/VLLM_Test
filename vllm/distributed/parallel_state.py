@@ -127,6 +127,56 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
+def _apply_to_device_comms(label: str, action: Callable[[Any], None]) -> None:
+    """Apply ``action`` to every group's device communicator, collectively.
+
+    Walks the registered parallel groups and skips those without a device
+    communicator (absent at ``world_size == 1``). Each communicator's
+    ``suspend``/``resume`` is a no-op unless it holds releasable device memory
+    (see ``DeviceCommunicatorBase``). Collective across ranks and synchronous
+    on return, so no extra sync is needed.
+    """
+    comms = []
+    for group_ref in _groups.values():
+        group = group_ref()
+        if group is None:
+            continue
+        dc = group.device_communicator
+        if dc is None:
+            continue
+        comms.append(dc)
+    if not comms:
+        return
+
+    free_before = torch.accelerator.get_memory_info()[0]
+    for dc in comms:
+        action(dc)
+    delta = torch.accelerator.get_memory_info()[0] - free_before
+    direction = "freed" if delta > 0 else "allocated"
+    logger.info(
+        "device-comm %s: %d comms, %.1f MiB %s",
+        label,
+        len(comms),
+        abs(delta) / 1024**2,
+        direction,
+    )
+
+
+def suspend_device_comms() -> None:
+    """Release idle device communicator memory on every group (collective).
+
+    Must run on every rank with communicators idle. Communicator suspend hooks
+    (e.g. NCCL's ncclCommSuspend) have internal cross-rank barriers; a no-op
+    where unsupported (older NCCL, world_size 1, non-CUDA).
+    """
+    _apply_to_device_comms("suspend", lambda c: c.suspend())
+
+
+def resume_device_comms() -> None:
+    """Restore all suspended device communicators before reuse (collective)."""
+    _apply_to_device_comms("resume", lambda c: c.resume())
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
