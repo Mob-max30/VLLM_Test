@@ -6,6 +6,7 @@ from typing import Any, ClassVar
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
@@ -45,6 +46,10 @@ class FlashAttnMLASparseBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_MLA_SPARSE"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return not envs.VLLM_BATCH_INVARIANT
 
     @staticmethod
     def get_builder_cls() -> type["FlashAttnMLASparseMetadataBuilder"]:
