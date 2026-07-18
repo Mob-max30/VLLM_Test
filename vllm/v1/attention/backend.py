@@ -615,6 +615,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
+    supports_fused_decode_graph: bool = False
 
     @abstractmethod
     def __init__(
@@ -738,6 +739,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             common_attn_metadata=common_attn_metadata,
             fast_build=True,
         )
+
+    def refresh_meta_for_draft_decodes(self, metadata: M) -> None:
+        pass
 
     def use_cascade_attention(
         self,
