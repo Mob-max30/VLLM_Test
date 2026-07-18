@@ -374,6 +374,8 @@ class ModelConfig:
     video_pruning_rate: InitVar[float | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
+    paged_shm_size: InitVar[int] = None
+    paged_shm_block_size: InitVar[int] = None
 
     def compute_hash(self) -> str:
         """
@@ -502,6 +504,8 @@ class ModelConfig:
         video_pruning_rate: float | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
+        paged_shm_size: int | None,
+        paged_shm_block_size: int | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -730,6 +734,8 @@ class ModelConfig:
                 video_pruning_rate=video_pruning_rate,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
+                paged_shm_size=paged_shm_size,
+                paged_shm_block_size=paged_shm_block_size,
             )
 
             mm_config_kwargs = {
