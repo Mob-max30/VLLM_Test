@@ -9,18 +9,30 @@
 import torch
 
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+CPU_THREADS = [32, 96, 0]
 
-@triton.autotune(
-    configs=[
+if current_platform.is_cpu():
+    _state_passing_configs = [
+        triton.Config({"BLOCK_SIZE": BS}, num_cpu_threads=t)
+        for BS in [128, 512, 2048]
+        for t in CPU_THREADS
+    ]
+else:
+    _state_passing_configs = [
         triton.Config({"BLOCK_SIZE": 64}),
         triton.Config({"BLOCK_SIZE": 128}),
         triton.Config({"BLOCK_SIZE": 256}),
         triton.Config({"BLOCK_SIZE": 512}),
         triton.Config({"BLOCK_SIZE": 1024}),
         triton.Config({"BLOCK_SIZE": 2048}),
-    ],
+    ]
+
+
+@triton.autotune(
+    configs=_state_passing_configs,
     key=["dim"],
 )
 @triton.jit
