@@ -172,6 +172,7 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        self.weight_version: int | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -378,6 +379,8 @@ class RequestState:
             ec_transfer_params=ec_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
+            # Parallel-sampling children may bind different versions.
+            weight_version=(self.weight_version if self.parent_req is None else None),
         )
 
     def _new_completion_output(
@@ -629,6 +632,8 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
+            if req_state.weight_version is None:
+                req_state.weight_version = engine_core_output.weight_version
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
