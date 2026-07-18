@@ -171,6 +171,7 @@ def test_scheduler_stats_route_to_existing_output_client():
     scheduler = create_scheduler()
     request = create_requests(num_requests=1)[0]
     request.client_index = 1
+    request.weight_version = 3
     scheduler.add_request(request)
 
     scheduler_output = scheduler.schedule()
@@ -188,6 +189,7 @@ def test_scheduler_stats_route_to_existing_output_client():
     assert 0 not in engine_core_outputs
     assert engine_core_outputs[1].scheduler_stats is not None
     assert len(engine_core_outputs[1].outputs) == 1
+    assert engine_core_outputs[1].outputs[0].weight_version == 3
 
 
 def test_schedule_multimodal_requests():

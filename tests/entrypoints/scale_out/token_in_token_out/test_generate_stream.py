@@ -125,6 +125,7 @@ def _make_request_output(
     logprobs: list[dict[int, Any] | None] | None = None,
     num_cached_tokens: int | None = None,
     index: int = 0,
+    weight_version: int | None = None,
 ) -> RequestOutput:
     return RequestOutput(
         request_id=request_id,
@@ -147,6 +148,7 @@ def _make_request_output(
         encoder_prompt=None,
         encoder_prompt_token_ids=None,
         num_cached_tokens=num_cached_tokens,
+        weight_version=weight_version,
     )
 
 
@@ -181,7 +183,11 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output(
-            "req-1", token_ids=[10], finish_reason="stop", finished=True
+            "req-1",
+            token_ids=[10],
+            finish_reason="stop",
+            finished=True,
+            weight_version=0,
         )
 
     engine.generate = MagicMock(side_effect=mock_generate)
@@ -197,6 +203,7 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
     response = await serving.serve_tokens(request)
 
     assert isinstance(response, GenerateResponse)
+    assert response.weight_version == 0
     assert (
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True
@@ -209,7 +216,7 @@ async def test_stream_basic():
     engine = _mock_engine()
 
     async def mock_generate(*args, **kwargs):
-        yield _make_request_output("req-1", token_ids=[10])
+        yield _make_request_output("req-1", token_ids=[10], weight_version=0)
         yield _make_request_output("req-1", token_ids=[20, 30])
         yield _make_request_output(
             "req-1", token_ids=[40], finish_reason="stop", finished=True
@@ -236,6 +243,7 @@ async def test_stream_basic():
     assert parsed[-1] == "[DONE]"
     data_chunks = [c for c in parsed if c != "[DONE]"]
     assert len(data_chunks) == 3
+    assert all(chunk["weight_version"] == 0 for chunk in data_chunks)
 
     assert data_chunks[0]["choices"][0]["token_ids"] == [10]
     assert data_chunks[1]["choices"][0]["token_ids"] == [20, 30]

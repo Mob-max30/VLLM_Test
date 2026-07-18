@@ -105,6 +105,8 @@ class RequestOutput:
         num_cached_tokens: The number of tokens with prefix cache hit.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+        weight_version: The policy-weight generation bound when this request
+                        entered the scheduler queue.
     """
 
     def __init__(
@@ -123,6 +125,7 @@ class RequestOutput:
         *,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        weight_version: int | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -144,6 +147,7 @@ class RequestOutput:
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
+        self.weight_version = weight_version
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
@@ -151,6 +155,8 @@ class RequestOutput:
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
+        if self.weight_version is None:
+            self.weight_version = next_output.weight_version
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):
@@ -188,7 +194,8 @@ class RequestOutput:
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
             f"lora_request={self.lora_request}, "
-            f"num_cached_tokens={self.num_cached_tokens})"
+            f"num_cached_tokens={self.num_cached_tokens}, "
+            f"weight_version={self.weight_version})"
         )
 
 

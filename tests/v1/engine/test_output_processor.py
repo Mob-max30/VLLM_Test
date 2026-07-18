@@ -99,6 +99,8 @@ def test_incremental_detokenization(
         outputs = engine_core.get_outputs()
         if len(outputs) == 0:
             break
+        for output in outputs:
+            output.weight_version = 7
 
         # Step the Detokenizer.
         processed_outputs = output_processor.process_outputs(outputs)
@@ -108,6 +110,7 @@ def test_incremental_detokenization(
 
         # Update tracking.
         for request_output in request_outputs:
+            assert request_output.weight_version == 7
             request_id = request_output.request_id
             new_text = request_output.outputs[0].text
             new_tokens = request_output.outputs[0].token_ids
