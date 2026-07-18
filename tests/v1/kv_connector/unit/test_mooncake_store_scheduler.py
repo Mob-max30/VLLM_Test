@@ -473,6 +473,8 @@ def test_from_request_tracker_no_load_saves_normally():
 class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
+        self.lookup_calls: list[tuple[str, int, list[bytes], bool]] = []
+        self.discarded_request_ids: list[str] = []
 
     def lookup(
         self,
@@ -481,7 +483,28 @@ class _StubLookupClient:
         block_hashes: list[bytes],
         non_block: bool = False,
     ) -> int:
+        self.lookup_calls.append((req_id, token_len, block_hashes, non_block))
         return self._hit_tokens
+
+    def discard(self, req_id: str) -> None:
+        self.discarded_request_ids.append(req_id)
+
+
+class _FailIfLookupCalledClient:
+    def __init__(self) -> None:
+        self.discarded_request_ids: list[str] = []
+
+    def lookup(
+        self,
+        req_id: str,
+        token_len: int,
+        block_hashes: list[bytes],
+        non_block: bool = False,
+    ) -> int:
+        raise AssertionError("local cache should skip Store lookup")
+
+    def discard(self, req_id: str) -> None:
+        self.discarded_request_ids.append(req_id)
 
 
 def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
@@ -537,3 +560,48 @@ def test_full_external_hit_with_full_local_hit_skips_load():
     assert need_to_allocate == 0
     assert load_async is False
     assert "req-0" not in scheduler.load_specs
+
+
+def test_local_cache_covering_usable_prefix_skips_store_lookup():
+    scheduler = _make_bare_scheduler()
+    scheduler.client = _FailIfLookupCalledClient()
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=32
+    )
+
+    assert need_to_allocate == 0
+    assert load_async is False
+    assert scheduler.client.discarded_request_ids == ["req-0"]
+    assert "req-0" not in scheduler.load_specs
+
+
+def test_non_aligned_local_hit_still_looks_up_usable_external_prefix():
+    scheduler = _make_bare_scheduler()
+    scheduler.load_async = False
+    scheduler.client = _StubLookupClient(hit_tokens=48)
+
+    request = SimpleNamespace(
+        request_id="req-0",
+        num_tokens=50,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
+        request, num_computed_tokens=40
+    )
+
+    assert need_to_allocate == 8
+    assert load_async is False
+    assert scheduler.client.lookup_calls == [("req-0", 48, request.block_hashes, False)]
+    assert scheduler.load_specs["req-0"] == LoadSpec(
+        vllm_cached_tokens=40,
+        kvpool_cached_tokens=48,
+        can_load=False,
+    )
