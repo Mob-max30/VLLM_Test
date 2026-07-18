@@ -16,7 +16,7 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 
 class ExllamaLinearKernel(MPLinearKernel):
-    SUPPORTED_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
+    SUPPORTED_QUANT_TYPES = [scalar_types.uint4, scalar_types.uint4b8, scalar_types.uint8b128]
     # In theory supports `scalar_types.uint2b2, scalar_types.uint3b4` too but
     # currently untested so not added to the list
 
@@ -95,7 +95,7 @@ class ExllamaLinearKernel(MPLinearKernel):
                 #  https://garden.danieldk.eu/GPTQ-Checkpoint-Format
                 zeros = torch.full(
                     (groups, out_features),
-                    c.weight_type.bias - 1,
+                    c.weight_type.bias,
                     dtype=torch.int32,
                     device=device,
                 )
@@ -110,7 +110,15 @@ class ExllamaLinearKernel(MPLinearKernel):
             setattr(
                 layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
             )
-
+        else:
+            def transform_w_zp(x):
+                assert isinstance(x, BasevLLMParameter)      
+                permute_param_layout_(x, input_dim=0, output_dim=1)
+                x.data = x.data.contiguous()
+                return x
+            self._transform_param(layer, self.w_zp_name, transform_w_zp)
+            
+                
         if c.has_g_idx:
 
             def transform_w_g_idx(x):
@@ -121,6 +129,7 @@ class ExllamaLinearKernel(MPLinearKernel):
             self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)  # type: ignore
         else:
             self.w_gidx_name = "g_idx"
+            device = getattr(layer, self.w_q_name).device
             empty_g_idx = torch.nn.Parameter(
                 torch.empty((0,), dtype=torch.int, device=device), requires_grad=False
             )
@@ -162,7 +171,7 @@ class ExllamaLinearKernel(MPLinearKernel):
         # gptq_gemm supports GPTQv2 format by passing use_v2_format=True.
         # However, the MPLinearLayerConfig doesn't contain format info.
         # So hardcode GPTQv1 format here, to keep its behavior unchanged.
-        use_v2_format = False
+        use_v2_format = True
 
         assert w_zp is not None, "Zero points are required by Exllama"
         assert w_g_idx is not None, "Group index is required by Exllama"
