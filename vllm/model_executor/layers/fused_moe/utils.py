@@ -407,7 +407,9 @@ def _pack_topk_ids_weights_kernel(
     tl.store(output_ptr + offsets, packed, mask=mask)
 
 
-def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
+def fi_moe_largest_bucket(
+    moe_config: "FusedMoEConfig", min_num_tokens: int = 8192
+) -> int:
     """Estimate FlashInfer's MoE autotuning maximum token count.
 
     All DP ranks may contribute `max_num_tokens` to one invocation.
@@ -421,7 +423,7 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
 
     For a detailed explanation, see: `docs/serving/data_parallel_deployment.md`
     """
-    return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
+    return max(moe_config.max_num_tokens * moe_config.dp_size, min_num_tokens)
 
 
 def trtllm_moe_pack_topk_ids_weights(
