@@ -213,6 +213,19 @@ class AutoWeightsLoader:
         self.ignore_unexpected_suffixes = ignore_unexpected_suffixes or []
         # update default skip_substrs
         self.skip_substrs += self.ROTARY_EMBEDS_UNUSED_WEIGHTS
+        # If the module has a `tie_word_embeddings` attribute, skip the lm_head weights.
+        config = getattr(module, "config", None)
+        if (
+            config is not None
+            and getattr(config, "tie_word_embeddings", False)
+            and "lm_head." not in self.skip_prefixes
+        ):
+            self.skip_prefixes = [*self.skip_prefixes, "lm_head."]
+        # If the module has a `mtp_start_layer_idx` attribute,
+        # it is an MTP head and should only load spec layers.
+        self.loads_spec_layers_only = any(
+            hasattr(m, "mtp_start_layer_idx") for m in module.modules()
+        )
 
     def _groupby_prefix(
         self,
@@ -339,6 +352,12 @@ class AutoWeightsLoader:
                         loaded_params,
                     )
 
+        # If the module has a `hf_to_vllm_mapper` attribute, apply it to the weights.
+        if not callable(getattr(module, "load_weights", None)):
+            module_mapper = getattr(module, "hf_to_vllm_mapper", None)
+            if module_mapper is not None:
+                weights = module_mapper.apply(weights)
+
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
 
@@ -381,6 +400,22 @@ class AutoWeightsLoader:
                     logger.debug("Ignoring missing %s", prefix)
 
                     continue
+
+                # Skip spec layers on base models and skip base layers on spec models.
+                config = getattr(self.module, "config", None)
+                if config is not None:
+                    is_spec_layer = (
+                        get_spec_layer_idx_from_weight_name(config, prefix + ".")
+                        is not None
+                    )
+                    if is_spec_layer != self.loads_spec_layers_only:
+                        logger.debug(
+                            "Skipping %s model layer %s",
+                            "base" if self.loads_spec_layers_only else "speculative",
+                            prefix,
+                        )
+
+                        continue
 
                 named_parameters = module.named_parameters(recurse=True)
                 desc_param_keys = {
@@ -533,6 +568,22 @@ def skip_spec_layers(
         for name, w in weights
         if get_spec_layer_idx_from_weight_name(config, name) is None
     )
+
+
+def autoload_weights(
+    model: nn.Module, weights: Iterable[tuple[str, torch.Tensor]]
+) -> set[str]:
+    """Load `weights` into `model` via its `load_weights`, or AutoWeightsLoader.
+
+    Models whose loading is fully handled by `AutoWeightsLoader` (mapper as a
+    class attribute, tied lm_head auto-skipped) need not define a trivial
+    `load_weights`. This is the single entry point every caller should use so
+    such models load correctly whether or not the method exists.
+    """
+    model_load_weights = getattr(model, "load_weights", None)
+    if callable(model_load_weights):
+        return model_load_weights(weights)
+    return AutoWeightsLoader(model).load_weights(weights)
 
 
 def init_vllm_registered_model(
