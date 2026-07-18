@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortFetchMsg,
     FetchMsg,
+    LookupMsg,
 )
 
 if TYPE_CHECKING:
@@ -63,6 +64,29 @@ class ClientRole:
         self._send = send
         self._inbound: dict[str, _InboundRequestState] = {}
         self._completed_loads: list[LoadResult] = []
+        # Symmetric-P2P lookup state, keyed by (kv_request_id, block_hash).
+        # Value is the probe outcome: None while in-flight (registered/sent
+        # but unresolved), True/False once a LookupRespMsg lands. There is no
+        # timeout — on_request_finished (finish_request → cancel_lookups) is
+        # guaranteed after the request's lookup() calls and clears every
+        # entry, so an unanswered probe simply stays None until then.
+        self._lookups: dict[tuple[str, bytes], bool | None] = {}
+        # Fast index of entries registered but not yet flushed onto the wire:
+        # (req_id, h) is in _unsent_lookups_by_req[req_id] from register_lookup
+        # until the next flush_pending_lookups, which drains and clears it.
+        self._unsent_lookups_by_req: dict[str, list[bytes]] = {}
+        # Tracks kv_request_ids we have emitted at least one LookupMsg
+        # for. A request's block set may be discovered across several
+        # scheduler steps, so more than one LookupMsg can go out per id;
+        # this only records that the peer has opened lookup state for the
+        # id, which cancel_lookups reads to decide whether a terminal
+        # empty FetchMsg is owed. Cleared on cancel_lookups / close.
+        self._flushed_req_ids: set[str] = set()
+        # Tracks kv_request_ids we have already emitted a FetchMsg for.
+        # cancel_lookups uses this to decide whether it must send a
+        # terminal empty FetchMsg to close the peer's lookup phase — see
+        # the ``cancel_lookups`` docstring for the full rationale.
+        self._fetch_sent_req_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -91,6 +115,7 @@ class ClientRole:
             kv_request_id=kv_request_id,
             submitted_at=time.monotonic(),
         )
+        self._fetch_sent_req_ids.add(kv_request_id)
         self._send(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -164,12 +189,151 @@ class ClientRole:
                 kv_request_id,
             )
 
+    # ------------------------------------------------------------------
+    # Symmetric-P2P lookup (do_p2p_fetch=true)
+    # ------------------------------------------------------------------
+
+    def register_lookup(self, kv_request_id: str, block_hash: bytes) -> bool | None:
+        """Register or resolve one (kv_request_id, block_hash) probe.
+
+        Idempotent across scheduler steps:
+        - First call: creates a pending entry, returns None.
+        - Subsequent calls while in-flight: returns None.
+        - Once a LookupRespMsg has resolved the entry: returns the cached
+          bool result on every call without popping it.
+
+        Resolved entries are retained until ``cancel_lookups`` (via
+        finish_request) clears all entries for the id. A request's block
+        set can be re-probed across steps, so popping on read would make
+        a repeat probe of an already-resolved hash look brand-new and
+        re-queue it, emitting a redundant LookupMsg for an answer we
+        already hold. Keeping the entry makes repeat probes free.
+        """
+        key = (kv_request_id, block_hash)
+        if key in self._lookups:
+            return self._lookups[key]
+        self._lookups[key] = None
+        self._unsent_lookups_by_req.setdefault(kv_request_id, []).append(block_hash)
+        logger.debug(
+            "P2P LOOKUP client %s: REGISTER kv_request_id=%s hash=%s (unsent=%d)",
+            self._peer_id,
+            kv_request_id,
+            block_hash.hex()[:16],
+            len(self._unsent_lookups_by_req[kv_request_id]),
+        )
+        return None
+
+    def flush_pending_lookups(self) -> None:
+        """Send a LookupMsg for each kv_request_id with unsent entries.
+
+        Called once per scheduler step from the manager's
+        ``on_schedule_end()``. A request's block set may be discovered
+        across several scheduler steps, so more than one LookupMsg can
+        go out per kv_request_id — one per step that registered new
+        hashes. register_lookup() de-dups in-flight and already-resolved
+        (req_id, hash) pairs, so each LookupMsg carries only the hashes
+        first probed in that step. The peer's lookup phase for the id is
+        still closed by exactly one FetchMsg, which the client contract
+        guarantees is sent after every lookup for the id has resolved
+        (see request_blocks / cancel_lookups). Send-gating is handled by
+        the injected ``_send`` callback (queues until ConnectAckMsg if
+        needed).
+        """
+        if not self._unsent_lookups_by_req:
+            return
+        for req_id, hashes in self._unsent_lookups_by_req.items():
+            # Record that the peer now holds lookup state for this id so
+            # cancel_lookups knows a terminal empty FetchMsg may be owed;
+            # idempotent across the request's multiple LookupMsgs.
+            self._flushed_req_ids.add(req_id)
+            logger.debug(
+                "P2P LOOKUP client %s: SEND LookupMsg kv_request_id=%s hashes=%d",
+                self._peer_id,
+                req_id,
+                len(hashes),
+            )
+            self._send(
+                {
+                    TYPE_KEY: LookupMsg.TYPE,
+                    LookupMsg.KV_REQUEST_ID: req_id,
+                    LookupMsg.BLOCK_HASHES: list(hashes),
+                }
+            )
+        self._unsent_lookups_by_req.clear()
+
+    def on_lookup_resp(
+        self,
+        kv_request_id: str,
+        block_hashes: Sequence[bytes],
+        hits: Sequence[bool],
+    ) -> None:
+        """Apply per-pair hit/miss results from a peer.
+
+        Pairs that don't match a known entry (already cancelled or
+        never asked) are silently dropped — the producer is free to
+        split or coalesce responses.
+        """
+        n_hit = sum(1 for hit in hits if hit)
+        logger.debug(
+            "P2P LOOKUP client %s: RECV LookupRespMsg kv_request_id=%s "
+            "hashes=%d hits=%d misses=%d",
+            self._peer_id,
+            kv_request_id,
+            len(block_hashes),
+            n_hit,
+            len(hits) - n_hit,
+        )
+        for h, hit in zip(block_hashes, hits):
+            key = (kv_request_id, h)
+            if key in self._lookups:
+                self._lookups[key] = hit
+
+    def cancel_lookups(self, kv_request_id: str) -> None:
+        """Drop lookup state and, if needed, close the peer's request.
+
+        Every FetchMsg the server receives in p2p mode is the
+        server-side "request finished" signal for its kv_request_id:
+        no further ``cb.create_store_job`` will fire, all server-side
+        lookup state for the id is released, and ``cb.finish_request``
+        fires on the TieringManager. In the happy path the FetchMsg
+        carrying blocks is that signal. But if the client's lookups
+        all missed no FetchMsg is ever sent, so on the finish path we
+        emit an empty FetchMsg purely to trigger those semantics on
+        the peer.
+
+        We only send the terminal FetchMsg when a LookupMsg was actually
+        flushed (``kv_request_id in _flushed_req_ids``): if the peer
+        never received a LookupMsg for this id, it has no state to
+        release.
+        """
+        if (
+            kv_request_id in self._flushed_req_ids
+            and kv_request_id not in self._fetch_sent_req_ids
+        ):
+            self._fetch_sent_req_ids.add(kv_request_id)
+            self._send(
+                {
+                    TYPE_KEY: FetchMsg.TYPE,
+                    FetchMsg.KV_REQUEST_ID: kv_request_id,
+                    FetchMsg.BLOCK_HASHES: [],
+                    FetchMsg.BLOCK_INDEXES: [],
+                }
+            )
+        keys = [k for k in self._lookups if k[0] == kv_request_id]
+        for k in keys:
+            del self._lookups[k]
+        self._unsent_lookups_by_req.pop(kv_request_id, None)
+        self._flushed_req_ids.discard(kv_request_id)
+
     def collect_results(self) -> list[LoadResult]:
-        """Walk timeouts and drain completed loads.
+        """Walk load timeouts and drain completed loads.
 
         Active requests past ``_LOAD_TIMEOUT_S`` get an AbortFetchMsg
         sent and enter the aborting phase. Aborting requests past
         ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed loads.
+
+        Lookups have no timeout: an unanswered probe stays None (RETRY)
+        until finish_request clears it — see ``_lookups``.
         """
         now = time.monotonic()
         to_remove: list[str] = []
@@ -210,9 +374,25 @@ class ClientRole:
         self._completed_loads = []
         return results
 
-    def close(self) -> list[tuple[int, str]]:
-        """Tear down. Returns ``(job_id, kv_request_id)`` for pending loads."""
+    def close(self) -> tuple[list[tuple[int, str]], list[str]]:
+        """Tear down.
+
+        Returns:
+            A ``(failed_loads, stranded_lookups)`` pair. ``failed_loads``
+            is ``(job_id, kv_request_id)`` for every load still in flight.
+            ``stranded_lookups`` is the kv_request_ids holding an
+            unresolved (in-flight) symmetric-P2P probe: with the peer gone
+            the probe can never be answered, so the manager must fail these
+            ids or the consumer's lookup() defers on them forever.
+        """
         failed = [(req.job_id, req.kv_request_id) for req in self._inbound.values()]
+        stranded_lookups = list(
+            {req_id for (req_id, _), hit in self._lookups.items() if hit is None}
+        )
         self._inbound.clear()
         self._completed_loads.clear()
-        return failed
+        self._lookups.clear()
+        self._unsent_lookups_by_req.clear()
+        self._flushed_req_ids.clear()
+        self._fetch_sent_req_ids.clear()
+        return failed, stranded_lookups

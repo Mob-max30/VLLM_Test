@@ -49,6 +49,22 @@ def _prefill_kv_params(
     }
 
 
+def _p2p_kv_params(
+    remote_host: str = "10.0.0.1",
+    remote_port: int = 8000,
+    kv_request_id: str = "req-1",
+) -> dict:
+    """Symmetric-P2P consumer kv_transfer_params: ``p2p`` sub-dict has
+    the same shape as ``prefill`` (kv_request_id + remote_host + port)."""
+    return {
+        "p2p": {
+            "kv_request_id": kv_request_id,
+            "remote_host": remote_host,
+            "remote_port": remote_port,
+        },
+    }
+
+
 def _decode_kv_params(kv_request_id: str = "req-1") -> dict:
     """Prefiller-side kv_transfer_params: ``decode`` sub-dict carries
     kv_request_id only."""
@@ -82,12 +98,56 @@ def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
     mgr._local_id = "127.0.0.1:7777"
+    mgr._hash_seed = "0"
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
+    mgr._orphan_finish_ctxs = []
     return mgr
+
+
+def _init_offloading_spec() -> SimpleNamespace:
+    """Minimal offloading_spec for driving the real __init__."""
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_index=0)
+        ),
+        block_size_factor=1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for __init__ PYTHONHASHSEED assertion
+# ---------------------------------------------------------------------------
+
+
+class TestInitHashSeedAssertion:
+    def test_missing_pythonhashseed_raises(self, monkeypatch):
+        """P2P instance refuses to start when PYTHONHASHSEED is unset."""
+        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+        with pytest.raises(ValueError, match="PYTHONHASHSEED"):
+            P2PSecondaryTierManager(
+                offloading_spec=_init_offloading_spec(),
+                primary_kv_view=memoryview(bytearray(16)),
+            )
+
+    def test_pythonhashseed_set_succeeds(self, monkeypatch):
+        """With PYTHONHASHSEED set, __init__ records it for the handshake."""
+        monkeypatch.setenv("PYTHONHASHSEED", "12345")
+        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
+        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
+        monkeypatch.setattr(
+            manager_module.FileMapper,
+            "from_offloading_spec",
+            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
+        )
+        mgr = P2PSecondaryTierManager(
+            offloading_spec=_init_offloading_spec(),
+            primary_kv_view=memoryview(bytearray(16)),
+        )
+        assert mgr._hash_seed == "12345"
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +217,76 @@ class TestLookup:
         mgr = _make_manager()
         ctx = _req_context(kv_params=_decode_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+
+# ---------------------------------------------------------------------------
+# Tests for serve_external_requests
+# ---------------------------------------------------------------------------
+
+
+class _RecordingParent:
+    """Minimal ParentManager stub recording on_request_finished calls."""
+
+    def __init__(self) -> None:
+        self.finished: list[str] = []
+
+    def on_new_request(self, ctx):
+        from vllm.v1.kv_offload.base import RequestOffloadingContext
+
+        return RequestOffloadingContext()
+
+    def lookup(self, key, ctx):
+        return LookupResult.MISS
+
+    def create_store_job(self, keys, ctx):
+        raise AssertionError("unreachable")
+
+    def on_request_finished(self, ctx) -> None:
+        self.finished.append(ctx.req_id)
+
+
+class _RecordingSession:
+    """Fake P2PSession that records the parent it was served with."""
+
+    def __init__(self) -> None:
+        self.served_with: list[object] = []
+
+    def serve_external_requests(self, parent) -> None:
+        self.served_with.append(parent)
+
+
+class TestServeExternalRequests:
+    def test_flushes_orphan_ctxs_then_serves_each_session(self):
+        """serve_external_requests releases ctxs orphaned by reaped
+        sessions via parent.on_request_finished (clearing the queue),
+        then delegates to every live session with the same parent."""
+        mgr = _make_manager()
+        ctx = ReqContext(req_id="p2p:peer:req-1:lu1")
+        mgr._orphan_finish_ctxs = [ctx]
+        sess_a = _RecordingSession()
+        sess_b = _RecordingSession()
+        mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[assignment]
+
+        parent = _RecordingParent()
+        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
+
+        # Orphan released and queue cleared.
+        assert parent.finished == ["p2p:peer:req-1:lu1"]
+        assert mgr._orphan_finish_ctxs == []
+        # Every live session served with the same parent handle.
+        assert sess_a.served_with == [parent]
+        assert sess_b.served_with == [parent]
+
+    def test_no_orphans_still_serves_sessions(self):
+        mgr = _make_manager()
+        sess = _RecordingSession()
+        mgr._sessions = {"a": sess}  # type: ignore[assignment]
+
+        parent = _RecordingParent()
+        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
+
+        assert parent.finished == []
+        assert sess.served_with == [parent]
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +424,20 @@ class TestSubmitLoad:
         assert mgr._finished_jobs == []
         assert "req-42" not in mgr._failed_req_ids
 
+    def test_missing_consumer_flag_fails(self):
+        """Peer fields present but neither do_remote_prefill nor
+        do_p2p_fetch is set — submit_load fails the job rather than
+        emit a stray FetchMsg."""
+        mgr = _make_manager()
+        params = {
+            "remote_host": "10.0.0.1",
+            "remote_port": 8000,
+            "kv_request_id": "req-1",
+        }
+        job = _job_metadata(job_id=1, kv_params=params)
+        mgr.submit_load(job)
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
 
 # ---------------------------------------------------------------------------
 # Tests for on_request_finished
@@ -333,6 +477,18 @@ class TestOnRequestFinished:
         session = _FakeSession(peer_id=peer_id)
         mgr._sessions[peer_id] = session
         ctx = _req_context(kv_params=_prefill_kv_params(kv_request_id="req-1"))
+        mgr.on_request_finished(ctx)
+        assert session.finishes == ["req-1"]
+
+    def test_p2p_consumer_side_calls_session_finish_request(self):
+        """Symmetric-P2P consumer finish (``p2p`` set) routes via peer_id
+        so the session drops any pending lookups (cancel_lookups) and
+        cancels any inbound load."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        session = _FakeSession(peer_id=peer_id)
+        mgr._sessions[peer_id] = session
+        ctx = _req_context(kv_params=_p2p_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
 
@@ -397,6 +553,8 @@ class _FakeSession:
         new_fetch_ids: list[str] | None = None,
         close_loads: list[tuple[int, str]] | None = None,
         close_stores: list[int] | None = None,
+        close_orphans: list[ReqContext] | None = None,
+        close_stranded: list[str] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -407,6 +565,8 @@ class _FakeSession:
         self._new_fetch_ids = new_fetch_ids or []
         self._close_loads = close_loads or []
         self._close_stores = close_stores or []
+        self._close_orphans = close_orphans or []
+        self._close_stranded = close_stranded or []
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
@@ -442,7 +602,12 @@ class _FakeSession:
         self.finishes.append(kv_request_id)
 
     def close(self):
-        return self._close_loads, self._close_stores
+        return (
+            self._close_loads,
+            self._close_stores,
+            self._close_orphans,
+            self._close_stranded,
+        )
 
 
 class TestGetFinished:
@@ -497,6 +662,29 @@ class TestGetFinished:
         assert JobResult(job_id=20, success=False) in results
         assert "dead:1234" not in mgr._sessions
         assert "req-load" in mgr._failed_req_ids
+
+    def test_reap_fails_stranded_lookups(self):
+        """A reaped session's in-flight lookups land in _failed_req_ids so
+        the consumer's lookup() returns MISS instead of RETRY forever."""
+
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr = self._make()
+        mgr._data = FakeData()  # type: ignore[assignment]
+        dead = _FakeSession(
+            peer_id="dead:1234",
+            alive=False,
+            connected=True,
+            close_stranded=["req-probe-1", "req-probe-2"],
+        )
+        mgr._sessions["dead:1234"] = dead  # type: ignore[assignment]
+
+        list(mgr.get_finished_jobs())
+        assert "dead:1234" not in mgr._sessions
+        assert "req-probe-1" in mgr._failed_req_ids
+        assert "req-probe-2" in mgr._failed_req_ids
 
     def test_unbound_store_kept_within_timeout(self):
         """Recently-parked unbound stores stay across a poll."""
@@ -1394,6 +1582,7 @@ class TestBindHostPortDefaults:
         identity (``host:port``) stays decoupled from the NIXL agent name
         (a uuid).
         """
+        monkeypatch.setenv("PYTHONHASHSEED", "0")
         monkeypatch.setattr(
             manager_module,
             "FileMapper",

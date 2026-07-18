@@ -26,6 +26,14 @@ Block Transfer Flow (happy path)
 
 1. Client sends FetchMsg with a kv_request_id and lists of
    block keys + remote indexes where it wants the data written.
+   In p2p mode FetchMsg is also the server-side "request finished"
+   signal for the id: no further ``cb.create_store_job`` will fire
+   (parked LookupMsg batches are popped, so pending-hash resolution
+   cannot promote a HIT after this point), all server-side lookup
+   state for the id is released, and ``cb.finish_request`` fires on
+   each dropped batch. The client emits exactly one FetchMsg per
+   lookup-touched request, including an empty one when no blocks
+   end up being fetched.
 2. Server matches requested blocks against locally stored blocks:
    - Blocks already available are transferred immediately via RDMA.
    - Blocks not yet available are recorded as "demanded" and
@@ -119,6 +127,9 @@ class ConnectMsg:
         BLOCK_LEN: Size in bytes of each block (must match between peers).
         CONFIG_FINGERPRINT: SHA-256 prefix of the model configuration.
             Peers with different fingerprints are incompatible.
+        HASH_SEED: The peer's PYTHONHASHSEED. Block hashes chain from a seed
+            derived from it, so peers with different values compute different
+            hashes for identical content and must not exchange blocks.
     """
 
     TYPE = "connect"
@@ -128,6 +139,7 @@ class ConnectMsg:
     NUM_BLOCKS = "num_blocks"
     BLOCK_LEN = "block_len"
     CONFIG_FINGERPRINT = "config_fingerprint"
+    HASH_SEED = "hash_seed"
 
     @staticmethod
     def validate(msg: dict) -> None:
@@ -137,6 +149,7 @@ class ConnectMsg:
         _require_non_neg_int(msg, ConnectMsg.BASE_ADDR)
         _require_pos_int(msg, ConnectMsg.NUM_BLOCKS)
         _require_pos_int(msg, ConnectMsg.BLOCK_LEN)
+        _require(msg, ConnectMsg.HASH_SEED, str)
 
 
 class ConnectAckMsg:
@@ -165,11 +178,21 @@ class DisconnectMsg:
 
 
 class FetchMsg:
-    """Client → Server: request blocks by key.
+    """Client → Server: request blocks by key and close the lookup phase.
+
+    In p2p mode FetchMsg is also the server-side "request finished"
+    signal for ``kv_request_id``: on receipt the server (a) fires no
+    further ``cb.create_store_job`` for this id — parked LookupMsg
+    batches are popped, so ``_resolve_pending_lookups`` cannot promote
+    a HIT_PENDING / RETRY hash into a fresh pin after this point — and
+    (b) calls ``cb.finish_request(batch.ctx)`` on each dropped batch
+    so the TieringManager can release per-batch bookkeeping. In the
+    all-miss case the client emits an empty FetchMsg (``BLOCK_HASHES``
+    and ``BLOCK_INDEXES`` both empty) purely to fire this signal.
 
     Fields:
         KV_REQUEST_ID: Identifies this block transfer request.
-        BLOCK_HASHES: List of block keys (OffloadKey bytes).
+        BLOCK_HASHES: List of block keys (OffloadKey bytes). May be empty.
         BLOCK_INDEXES: List of remote block indexes (same length as BLOCK_HASHES).
     """
 
@@ -194,6 +217,68 @@ class FetchMsg:
         for idx in indexes:
             if not isinstance(idx, int) or idx < 0:
                 raise ValueError(f"block_indexes: invalid index {idx!r}")
+
+
+class LookupMsg:
+    """Client → Server: probe which block hashes the peer holds.
+
+    Sent on the consumer side under symmetric P2P (do_p2p_fetch=true)
+    after the consumer has aggregated per-block lookups across a
+    scheduler step. The producer replies with one or more LookupRespMsg
+    covering the requested hashes.
+
+    Fields:
+        KV_REQUEST_ID: Identifies this lookup transaction.
+        BLOCK_HASHES: List of block keys (OffloadKey bytes) to probe.
+    """
+
+    TYPE = "lookup"
+    KV_REQUEST_ID = "kv_request_id"
+    BLOCK_HASHES = "block_hashes"
+
+    @staticmethod
+    def validate(msg: dict) -> None:
+        """Raise ValueError if any field has an invalid type or value."""
+        _require(msg, LookupMsg.KV_REQUEST_ID, str)
+        _require_list(msg, LookupMsg.BLOCK_HASHES)
+
+
+class LookupRespMsg:
+    """Server → Client: per-hash hit/miss answer for a prior LookupMsg.
+
+    Carries two parallel arrays of equal length so each (block_hash,
+    hit) pair is self-describing. The producer is free to split or
+    coalesce responses across multiple LookupMsgs for the same
+    KV_REQUEST_ID — the consumer matches each pair back to its
+    pending entry by (KV_REQUEST_ID, block_hash).
+
+    Fields:
+        KV_REQUEST_ID: The lookup transaction this responds to.
+        BLOCK_HASHES: List of block keys answered by this message.
+        HITS: Parallel list of bools — True if the producer holds the
+            corresponding block, False otherwise.
+    """
+
+    TYPE = "lookup_resp"
+    KV_REQUEST_ID = "kv_request_id"
+    BLOCK_HASHES = "block_hashes"
+    HITS = "hits"
+
+    @staticmethod
+    def validate(msg: dict) -> None:
+        """Raise ValueError if any field has an invalid type or value."""
+        _require(msg, LookupRespMsg.KV_REQUEST_ID, str)
+        _require_list(msg, LookupRespMsg.BLOCK_HASHES)
+        _require_list(msg, LookupRespMsg.HITS)
+        hashes = msg[LookupRespMsg.BLOCK_HASHES]
+        hits = msg[LookupRespMsg.HITS]
+        if len(hashes) != len(hits):
+            raise ValueError(
+                f"block_hashes/hits length mismatch: {len(hashes)} vs {len(hits)}"
+            )
+        for hit in hits:
+            if not isinstance(hit, bool):
+                raise ValueError(f"hits: invalid value {hit!r}")
 
 
 class TransferDoneMsg:

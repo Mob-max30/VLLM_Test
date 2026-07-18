@@ -8,6 +8,7 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -23,12 +24,12 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
-    ScheduleEndContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
@@ -37,6 +38,7 @@ from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+    from vllm.v1.kv_offload.tiering.base import ParentManager
     from vllm.v1.kv_offload.tiering.p2p.control.base import ControlConnection
 
 logger = init_logger(__name__)
@@ -77,6 +79,27 @@ def _decode_params(kv_params: dict | None) -> dict | None:
     if not kv_params:
         return None
     return kv_params.get("decode")
+
+
+def _p2p_params(kv_params: dict | None) -> dict | None:
+    """Return the ``p2p`` sub-dict, or None if absent.
+
+    Set on symmetric-P2P consumer requests; carries kv_request_id,
+    remote_host, remote_port.
+    """
+    if not kv_params:
+        return None
+    return kv_params.get("p2p")
+
+
+def _consumer_params(kv_params: dict | None) -> dict | None:
+    """Return the consumer sub-dict for either PD or symmetric-P2P.
+
+    Decoder (PD) requests carry ``prefill``; symmetric-P2P consumers
+    carry ``p2p``. Both have the same shape (kv_request_id, remote_host,
+    remote_port) so callers can use whichever is set.
+    """
+    return _prefill_params(kv_params) or _p2p_params(kv_params)
 
 
 @dataclass
@@ -157,6 +180,20 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             **kwargs: Reserved for future tier-specific options.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        # Block hashes chain from NONE_HASH, seeded from PYTHONHASHSEED
+        # (see init_none_hash in v1/core/kv_cache_utils.py). Peers with
+        # different seeds compute different hashes for identical content, so
+        # lookups silently miss and no KV crosses the wire. Require it here so
+        # a misconfigured P2P instance fails at startup rather than degrading
+        # silently; the value is also verified against each peer on handshake.
+        hash_seed = os.getenv("PYTHONHASHSEED")
+        if hash_seed is None:
+            raise ValueError(
+                "PYTHONHASHSEED must be set for P2P KV offload so that block "
+                "hashes match across instances. Set it to a fixed value (e.g. "
+                "PYTHONHASHSEED=0) on every prefiller and decoder."
+            )
+        self._hash_seed = hash_seed
         if host is None:
             host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
         if port is None:
@@ -210,6 +247,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # kv_request_ids that hit a transport/session failure; On load lookup()
         # rejects them so the request falls back to local prefill.
         self._failed_req_ids: set[str] = set()
+        # Synthetic lookup ctxs from reaped sessions still owing a
+        # ``parent.on_request_finished``. The dead session had no parent
+        # handle at teardown; these are flushed at the top of the next
+        # ``serve_external_requests`` where the handle is valid.
+        self._orphan_finish_ctxs: list[ReqContext] = []
 
     # ------------------------------------------------------------------
     # SecondaryTierManager interface
@@ -217,33 +259,55 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        prefill = _prefill_params(req_context.kv_transfer_params)
+        consumer = _consumer_params(req_context.kv_transfer_params)
         if (
-            not prefill
-            or not prefill.get("remote_host")
-            or not prefill.get("remote_port")
-            or not prefill.get("kv_request_id")
+            not consumer
+            or not consumer.get("remote_host")
+            or not consumer.get("remote_port")
+            or not consumer.get("kv_request_id")
         ):
             return LookupResult.MISS
 
-        kv_request_id = prefill["kv_request_id"]
+        kv_request_id = consumer["kv_request_id"]
         if kv_request_id in self._failed_req_ids:
             return LookupResult.MISS
+
+        # Symmetric-P2P consumer (``p2p`` sub-dict): probe the peer
+        # asynchronously. First call registers the (kv_request_id,
+        # block_hash) entry and returns RETRY; flush_pending_lookups()
+        # in on_schedule_end batches the LookupMsg; a later step's
+        # lookup() returns HIT/MISS once LookupRespMsg has arrived.
+        # PD path (``prefill`` sub-dict only) keeps the eager HIT today.
+        if _p2p_params(req_context.kv_transfer_params):
+            peer_id = self._remote_id_from_params(consumer)
+            session = self._sessions.get(peer_id) if peer_id else None
+            if session is None:
+                return LookupResult.MISS
+            result = session.register_lookup(kv_request_id, key)
+            if result is True:
+                return LookupResult.HIT
+            if result is False:
+                return LookupResult.MISS
+            return LookupResult.RETRY
+
+        # PD consumer (we are the decoder): all kv blocks should be on the
+        # prefiller side. Return HIT immediately.
         return LookupResult.HIT
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """Open the outbound session toward the producer if needed.
 
-        On the decoder side (``prefill`` set), open a session toward the
-        producer at remote_host:remote_port so submit_load can issue
-        FetchMsg as soon as it fires. On the prefiller side, sessions
-        are created when the consumer's inbound connection arrives in
-        _accept_new_peers — submit_store no longer pre-creates anything.
+        On the consumer side (``prefill`` for PD or ``p2p`` for symmetric
+        P2P), open a session toward the producer at remote_host:remote_port
+        so submit_load can issue FetchMsg as soon as it fires. On the
+        prefiller side, sessions are created when the consumer's inbound
+        connection arrives in _accept_new_peers — submit_store no longer
+        pre-creates anything.
         """
-        prefill = _prefill_params(req_context.kv_transfer_params)
-        if prefill:
-            peer_id = self._remote_id_from_params(prefill)
+        consumer = _consumer_params(req_context.kv_transfer_params)
+        if consumer:
+            peer_id = self._remote_id_from_params(consumer)
             if peer_id:
                 self._get_or_create_session(peer_id)
         return RequestOffloadingContext()
@@ -252,10 +316,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Cancels pending loads and prunes session-scoped state.
 
-        Decoder side (``prefill`` set): looks up the session by peer_id
-        because the producer's address is what addresses the client-role
-        load to cancel. Prefiller side (``decode`` set): looks up via
-        kv_request_id because peer_id is no longer carried on store-time
+        Consumer side (``prefill`` for PD or ``p2p`` for symmetric-P2P):
+        looks up the session by peer_id because the producer's address
+        is what addresses the client-role load to cancel; also drops any
+        pending symmetric-P2P lookup state via ``session.finish_request``.
+        Prefiller side (``decode`` set): looks up via kv_request_id
+        because peer_id is no longer carried on store-time
         kv_transfer_params; if a session has bound the id, finish it. If
         no session has bound the id yet, this is a no-op: parked batches
         in `_unbound_stores` are left in place and cleaned up only by
@@ -264,15 +330,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         kv_params = req_context.kv_transfer_params
         if not kv_params:
             return
-        prefill = _prefill_params(kv_params)
+        consumer = _consumer_params(kv_params)
         decode = _decode_params(kv_params)
-        kv_request_id = (prefill or decode or {}).get("kv_request_id")
+        kv_request_id = (consumer or decode or {}).get("kv_request_id")
         if not kv_request_id:
             return
         self._failed_req_ids.discard(kv_request_id)
 
-        if prefill:
-            peer_id = self._remote_id_from_params(prefill)
+        if consumer:
+            peer_id = self._remote_id_from_params(consumer)
             if peer_id:
                 session = self._sessions.get(peer_id)
                 if session is not None:
@@ -336,7 +402,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 block_ids=block_ids,
             )
         )
-        logger.debug(
+        logger.info(
             "P2P %s: parked submit_store kv_request_id=%s job_id=%d blocks=%d",
             self._local_id,
             kv_request_id,
@@ -350,32 +416,32 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         block_ids = job_metadata.block_ids
 
-        prefill = _prefill_params(job_metadata.req_context.kv_transfer_params)
+        consumer = _consumer_params(job_metadata.req_context.kv_transfer_params)
         logger.debug(
             "P2P %s: submit_load ENTRY job_id=%d blocks=%d kv_request_id=%s peer=%s",
             self._local_id,
             job_id,
             len(block_ids),
-            (prefill or {}).get("kv_request_id"),
-            self._remote_id_from_params(prefill or {}),
+            (consumer or {}).get("kv_request_id"),
+            self._remote_id_from_params(consumer or {}),
         )
         if (
-            not prefill
-            or not prefill.get("remote_host")
-            or not prefill.get("remote_port")
-            or not prefill.get("kv_request_id")
+            not consumer
+            or not consumer.get("remote_host")
+            or not consumer.get("remote_port")
+            or not consumer.get("kv_request_id")
         ):
             logger.debug(
-                "P2P %s: submit_load job_id=%d FAILED missing prefill params",
+                "P2P %s: submit_load job_id=%d FAILED missing consumer params",
                 self._local_id,
                 job_id,
             )
             self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             return
 
-        kv_request_id = prefill["kv_request_id"]
-        peer_id = self._remote_id_from_params(prefill)
-        assert peer_id is not None  # guaranteed by prefill checks above
+        kv_request_id = consumer["kv_request_id"]
+        peer_id = self._remote_id_from_params(consumer)
+        assert peer_id is not None  # guaranteed by consumer checks above
 
         if not keys:
             logger.debug(
@@ -457,8 +523,30 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             time.sleep(_DRAIN_SLEEP_S)
 
     @override
+    def serve_external_requests(self, parent: ParentManager) -> None:
+        """Serve inbound peer lookups against the tiering manager.
+
+        Called once per scheduler step (before this tier's
+        ``on_schedule_end``) with a ``parent`` handle valid only for the
+        duration of the call — the sole window in which the P2P server
+        role may query the tiering manager. First release bookkeeping for
+        any lookups orphaned by a reaped session, then let every live
+        session resolve its enqueued inbound LookupMsgs.
+        """
+        if self._orphan_finish_ctxs:
+            for ctx in self._orphan_finish_ctxs:
+                parent.on_request_finished(ctx)
+            self._orphan_finish_ctxs = []
+        for session in self._sessions.values():
+            session.serve_external_requests(parent)
+
+    @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
-        return
+        # Flush any p2p lookups aggregated during this step.
+        # One LookupMsg per (peer, kv_request_id) with unsent entries;
+        # send-gating happens inside the session if not yet ready.
+        for session in self._sessions.values():
+            session.flush_pending_lookups()
 
     # ------------------------------------------------------------------
     # Internal
@@ -476,11 +564,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _get_or_create_session(self, peer_id: str) -> P2PSession:
         """Return the existing session for peer_id, or open one outbound.
 
-        Decoder-side helper for on_new_request: when ``prefill`` is set,
-        the consumer must reach the producer at peer_id. If we already
-        have a session toward that peer (from a prior load or a
-        peer-initiated inbound), reuse it; otherwise open an outbound
-        ControlConnection and build a connected session.
+        Consumer-side helper for on_new_request: when ``prefill`` (PD)
+        or ``p2p`` (symmetric P2P) is set, the consumer must reach the
+        producer at peer_id. If we already have a session toward that
+        peer (from a prior load or a peer-initiated inbound), reuse it;
+        otherwise open an outbound ControlConnection and build a
+        connected session.
         """
         session = self._sessions.get(peer_id)
         if session is not None:
@@ -491,6 +580,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             local_id=self._local_id,
             transport=self._data,
             local_block_len=self._data.block_len,
+            local_hash_seed=self._hash_seed,
             conn=conn,
         )
         self._sessions[peer_id] = session
@@ -512,6 +602,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     local_id=self._local_id,
                     transport=self._data,
                     local_block_len=self._data.block_len,
+                    local_hash_seed=self._hash_seed,
                     conn=conn,
                 )
                 logger.info(
@@ -546,12 +637,21 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             ]
             for kid in stale_kv_ids:
                 del self._kv_to_session[kid]
-            failed_loads, failed_stores = session.close()
+            failed_loads, failed_stores, orphan_ctxs, stranded_lookups = session.close()
             for job_id, kv_request_id in failed_loads:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
                 self._failed_req_ids.add(kv_request_id)
             for job_id in failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            # Fail any request whose symmetric-P2P probe was still in flight
+            # toward the dead peer so lookup() returns MISS (local prefill)
+            # instead of RETRY forever — even if a fresh session to the same
+            # peer is later opened by another request.
+            for kv_request_id in stranded_lookups:
+                self._failed_req_ids.add(kv_request_id)
+            # Release the TieringManager's per-request bookkeeping for the
+            # dead session's synthetic lookups on the next serve_external_requests.
+            self._orphan_finish_ctxs.extend(orphan_ctxs)
             self._data.remove_remote_peer(pid)
             logger.warning("P2P %s: peer %s down", self._local_id, pid)
 
@@ -648,6 +748,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def shutdown(self) -> None:
         self._drain_inflight_for_shutdown()
         for session in self._sessions.values():
+            # Orphan ctxs from close() are intentionally dropped: the manager
+            # is being torn down, so there is no next serve_external_requests
+            # to flush them and no TieringManager left to release.
             session.close()
         self._sessions.clear()
         self._kv_to_session.clear()

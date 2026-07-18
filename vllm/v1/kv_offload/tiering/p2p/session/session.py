@@ -34,6 +34,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     ConnectMsg,
     DisconnectMsg,
     FetchMsg,
+    LookupMsg,
+    LookupRespMsg,
     TransferDoneMsg,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
@@ -42,7 +44,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import (
 )
 
 if TYPE_CHECKING:
-    from vllm.v1.kv_offload.tiering.base import JobId
+    from vllm.v1.kv_offload.base import ReqContext
+    from vllm.v1.kv_offload.tiering.base import JobId, ParentManager
     from vllm.v1.kv_offload.tiering.p2p.data import DataTransport
 
 logger = init_logger(__name__)
@@ -93,12 +96,14 @@ class P2PSession:
         local_id: str,
         transport: DataTransport,
         local_block_len: int,
+        local_hash_seed: str,
         conn: ControlConnection | None = None,
     ) -> None:
         self.peer_id = peer_id
         self._local_id = local_id
         self._transport = transport
         self._local_block_len = local_block_len
+        self._local_hash_seed = local_hash_seed
         self._conn: ControlConnection | None = None
 
         self._send_ready = False  # True after the peer acked our ConnectMsg
@@ -115,7 +120,11 @@ class P2PSession:
         self._new_fetch_ids: list[str] = []
 
         self._client = ClientRole(peer_id=peer_id, send=self._send)
-        self._server = ServerRole(peer_id=peer_id, transport=transport, send=self._send)
+        self._server = ServerRole(
+            peer_id=peer_id,
+            transport=transport,
+            send=self._send,
+        )
 
         if conn is not None:
             self.attach_connection(conn)
@@ -183,12 +192,40 @@ class P2PSession:
     def finish_request(self, kv_request_id: str) -> None:
         """Called when the request is finishing locally.
 
-        Cancels any inbound load (client role) and finalizes any
+        Cancels any inbound load (client role), drops any pending
+        symmetric-P2P lookup state (client role), and finalizes any
         outbound serving (server role) for this id. Roles that aren't
         active for this id are silent no-ops.
         """
         self._client.cancel(kv_request_id)
+        self._client.cancel_lookups(kv_request_id)
         self._server.finish(kv_request_id)
+
+    def register_lookup(self, kv_request_id: str, block_hash: bytes) -> bool | None:
+        """Register or resolve one (kv_request_id, block_hash) probe.
+
+        Called from the manager's lookup() for symmetric-P2P consumers
+        (``p2p`` sub-dict in kv_transfer_params). See
+        ``ClientRole.register_lookup`` for the state-machine contract.
+        """
+        return self._client.register_lookup(kv_request_id, block_hash)
+
+    def flush_pending_lookups(self) -> None:
+        """Flush any aggregated symmetric-P2P lookups for this peer.
+
+        Called once per scheduler step from the manager's
+        ``on_schedule_end()``. Send-gating is handled inside the
+        client's ``_send`` callback (queues until ConnectAckMsg).
+        """
+        self._client.flush_pending_lookups()
+
+    def serve_external_requests(self, parent: ParentManager) -> None:
+        """Resolve inbound peer lookups against the tiering manager.
+
+        Delegates to the server role; the ``parent`` handle is valid
+        only for the duration of this call.
+        """
+        self._server.serve_external_requests(parent)
 
     def poll(self) -> SessionPollResult:
         """Process incoming messages, drive transfers, apply timeouts."""
@@ -214,14 +251,25 @@ class P2PSession:
             loads=loads, stores=stores, new_fetch_ids=new_fetch_ids
         )
 
-    def close(self) -> tuple[list[tuple[int, str]], list[int]]:
-        """Shut down. Returns (failed_loads, failed_stores).
+    def close(
+        self,
+    ) -> tuple[list[tuple[int, str]], list[int], list[ReqContext], list[str]]:
+        """Shut down.
+
+        Returns (failed_loads, failed_stores, orphan_ctxs, stranded_lookups).
 
         failed_loads: list of (job_id, kv_request_id) pairs.
         failed_stores: list of job_ids.
+        orphan_ctxs: synthetic lookup ctxs still owing
+            ``parent.on_request_finished`` (the manager flushes these on
+            its next ``serve_external_requests``).
+        stranded_lookups: kv_request_ids with an unresolved symmetric-P2P
+            probe toward the now-dead peer. The manager fails these so the
+            consumer's lookup() falls back to local prefill instead of
+            deferring forever on an answer that can never arrive.
         """
-        failed_loads = self._client.close()
-        failed_stores = self._server.close()
+        failed_loads, stranded_lookups = self._client.close()
+        failed_stores, orphan_ctxs = self._server.close()
 
         if self._conn is not None:
             with contextlib.suppress(Exception):
@@ -229,7 +277,7 @@ class P2PSession:
             self._conn.close()
             self._conn = None
 
-        return failed_loads, failed_stores
+        return failed_loads, failed_stores, orphan_ctxs, stranded_lookups
 
     # ------------------------------------------------------------------
     # Message dispatch
@@ -324,6 +372,23 @@ class P2PSession:
         elif msg_type == AbortAckMsg.TYPE:
             AbortAckMsg.validate(msg)
             self._client.on_abort_ack(msg[AbortAckMsg.KV_REQUEST_ID])
+        elif msg_type == LookupMsg.TYPE:
+            LookupMsg.validate(msg)
+            kv_request_id = msg[LookupMsg.KV_REQUEST_ID]
+            block_hashes = [
+                OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
+                for bh in msg[LookupMsg.BLOCK_HASHES]
+            ]
+            self._server.on_lookup(kv_request_id, block_hashes)
+        elif msg_type == LookupRespMsg.TYPE:
+            LookupRespMsg.validate(msg)
+            kv_request_id = msg[LookupRespMsg.KV_REQUEST_ID]
+            block_hashes = [
+                OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
+                for bh in msg[LookupRespMsg.BLOCK_HASHES]
+            ]
+            hits = msg[LookupRespMsg.HITS]
+            self._client.on_lookup_resp(kv_request_id, block_hashes, hits)
         elif msg_type == DisconnectMsg.TYPE:
             if self._conn is not None:
                 self._conn.mark_dead()
@@ -360,6 +425,12 @@ class P2PSession:
                 raise ValueError(
                     f"config fingerprint mismatch from {self.peer_id}: "
                     f"remote={remote_fp!r}, local={local_fp!r}"
+                )
+            if msg[ConnectMsg.HASH_SEED] != self._local_hash_seed:
+                raise ValueError(
+                    f"PYTHONHASHSEED mismatch from {self.peer_id}: "
+                    f"remote={msg[ConnectMsg.HASH_SEED]!r}, "
+                    f"local={self._local_hash_seed!r}"
                 )
             self._transport.add_remote_peer(
                 self.peer_id,
@@ -410,6 +481,7 @@ class P2PSession:
                 ConnectMsg.NUM_BLOCKS: self._transport.num_blocks,
                 ConnectMsg.BLOCK_LEN: self._transport.block_len,
                 ConnectMsg.CONFIG_FINGERPRINT: self._transport.config_fingerprint,
+                ConnectMsg.HASH_SEED: self._local_hash_seed,
             }
         )
 
@@ -433,8 +505,15 @@ class P2PSession:
             self._conn.send(msg)
             logger.debug("P2PSession %s: sent %s", self.peer_id, msg.get(TYPE_KEY))
         except Exception:
+            # A send failure means the connection is broken. Swallowing it
+            # silently strands every in-flight lookup/load toward this peer:
+            # the session stays alive, is never reaped, and the consumer's
+            # lookup() keeps returning RETRY until the HTTP client times out.
+            # Mark the connection dead so the manager reaps the session on
+            # its next poll and surfaces the stranded work as failures.
             logger.warning(
-                "P2PSession %s: failed to send %s",
+                "P2PSession %s: send of %s failed — marking connection dead",
                 self.peer_id,
                 msg.get(TYPE_KEY),
             )
+            self._conn.mark_dead()
