@@ -28,8 +28,16 @@ fi
 # test whether the metadata.json url is valid, retry each 3 minutes up to 5 times
 # this avoids cumbersome error messages & manual retries in case the precompiled wheel
 # for the given commit is still being built in the release pipeline
-meta_json_url="https://wheels.vllm.ai/$merge_base_commit/vllm/metadata.json"
-echo "INFO: will use metadata.json from $meta_json_url"
+_vllm_target_lower="$(printf '%s' "${VLLM_TARGET_DEVICE:-}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${_vllm_target_lower}" == "rocm" ]] || [[ -d /opt/rocm ]] || command -v rocminfo >/dev/null 2>&1; then
+    _rocm_variant="${VLLM_PRECOMPILED_WHEEL_VARIANT:-rocm723}"
+    meta_json_url="https://wheels.vllm.ai/rocm/${merge_base_commit}/${_rocm_variant}/vllm/metadata.json"
+    unset -v _rocm_variant
+else
+    meta_json_url="https://wheels.vllm.ai/${merge_base_commit}/vllm/metadata.json"
+fi
+unset -v _vllm_target_lower
+echo "INFO: will use metadata.json from ${meta_json_url}"
 
 for i in {1..5}; do
     echo "Checking metadata.json URL (attempt $i)..."

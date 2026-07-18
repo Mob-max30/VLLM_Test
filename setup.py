@@ -503,13 +503,14 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def fetch_metadata_for_variant(
-        commit: str, variant: str | None
+        commit: str, variant: str | None, *, rocm: bool = False
     ) -> tuple[list[dict], str]:
         """
         Fetches metadata for a specific variant of the precompiled wheel.
         """
         variant_dir = f"{variant}/" if variant is not None else ""
-        repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
+        commit_prefix = f"rocm/{commit}" if rocm else commit
+        repo_url = f"https://wheels.vllm.ai/{commit_prefix}/{variant_dir}vllm/"
         meta_url = repo_url + "metadata.json"
         print(f"Trying to fetch nightly build metadata from {meta_url}")
         from urllib.request import urlopen
@@ -579,6 +580,21 @@ class precompiled_wheel_utils:
         return variant
 
     @staticmethod
+    def detect_system_rocm_variant() -> str:
+        dockerfile = ROOT_DIR / "docker" / "Dockerfile.rocm_base"
+        try:
+            for line in dockerfile.read_text().splitlines():
+                if line.startswith("ARG BASE_IMAGE="):
+                    if m := re.search(r":(\d+\.\d+\.\d+)", line):
+                        variant = "rocm" + m.group(1).replace(".", "")
+                        print(f"Detected ROCm variant {variant} from Dockerfile.rocm_base")
+                        return variant
+        except OSError:
+            pass
+        print("Using default ROCm variant rocm723")
+        return "rocm723"
+
+    @staticmethod
     def find_local_rocm_wheel() -> str | None:
         """Search for a local vllm wheel in common locations."""
         import glob
@@ -634,6 +650,54 @@ class precompiled_wheel_utils:
         if local_wheel is not None:
             print(f"Found local ROCm wheel: {local_wheel}")
             return local_wheel, None
+
+        import platform
+
+        arch = platform.machine()
+        default_variant = precompiled_wheel_utils.detect_system_rocm_variant()
+        variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None) or default_variant
+        commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
+        if not commit or len(commit) != 40:
+            print(
+                f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}"
+                ", trying to fetch base commit in main branch"
+            )
+            commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+        print(f"Using precompiled ROCm wheel commit {commit} with variant {variant}")
+        wheels, repo_url = None, None
+        for try_variant in dict.fromkeys([variant, default_variant]):
+            try:
+                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                    commit, try_variant, rocm=True
+                )
+                break
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch ROCm precompiled wheel metadata for variant %s: %s",
+                    try_variant,
+                    e,
+                )
+        if wheels is not None and repo_url is not None:
+            from urllib.parse import urljoin
+
+            for wheel in wheels:
+                if wheel.get("package_name") == "vllm" and arch in wheel.get(
+                    "platform_tag", ""
+                ):
+                    print(f"Found precompiled wheel metadata: {wheel}")
+                    if "path" not in wheel:
+                        raise ValueError(f"Wheel metadata missing path: {wheel}")
+                    wheel_url = urljoin(repo_url, wheel["path"])
+                    download_filename = wheel.get("filename")
+                    print(f"Using precompiled wheel URL: {wheel_url}")
+                    return wheel_url, download_filename
+            logger.warning(
+                "No precompiled vllm wheel found for architecture %s "
+                "from repo %s. All available wheels: %s",
+                arch,
+                repo_url,
+                wheels,
+            )
 
         # Fall back to AMD's PyPI index
         index_url = os.getenv(
