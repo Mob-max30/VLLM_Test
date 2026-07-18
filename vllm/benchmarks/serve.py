@@ -2057,6 +2057,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                 "top_p": args.top_p,
                 "top_k": args.top_k,
                 "min_p": args.min_p,
+                "p_less": args.p_less,
                 "temperature": args.temperature,
                 "frequency_penalty": args.frequency_penalty,
                 "presence_penalty": args.presence_penalty,
