@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Callable, Sequence
+
 from vllm.tokenizers import TokenizerLike
 
 
@@ -55,6 +57,79 @@ def _convert_tokens_to_string_with_added_encoders(
 # tokenizers (bigger = more conservative).
 INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET = 5
 
+_SENTENCEPIECE_LEADING_SPACE_MARKER = "▁"
+_BYTE_LEVEL_BPE_LEADING_SPACE_MARKER = "Ġ"
+# id_to_piece/convert_ids_to_tokens exposes raw tokenizer pieces, but there is
+# no tokenizer-agnostic API that says whether decode normalized away a leading
+# space. Keep recognition limited to the canonical SentencePiece and byte-level
+# BPE leading-space markers used in raw vocab pieces.
+_LEADING_SPACE_MARKERS = frozenset(
+    (
+        _SENTENCEPIECE_LEADING_SPACE_MARKER,
+        _BYTE_LEVEL_BPE_LEADING_SPACE_MARKER,
+    )
+)
+
+
+def _get_sentencepiece_id_to_piece(
+    tokenizer: TokenizerLike,
+) -> Callable[[int], object] | None:
+    # MistralTokenizer stores its SentencePiece tokenizer on `.tokenizer` and
+    # marks that path with `is_spm`; do not use the same attribute for Tekken.
+    if getattr(tokenizer, "is_spm", False):
+        id_to_piece = getattr(
+            getattr(tokenizer, "tokenizer", None), "id_to_piece", None
+        )
+        if callable(id_to_piece):
+            return id_to_piece
+
+    id_to_piece = getattr(tokenizer, "id_to_piece", None)
+    if callable(id_to_piece):
+        return id_to_piece
+
+    sp_model = getattr(tokenizer, "sp_model", None)
+    id_to_piece = getattr(sp_model, "id_to_piece", None)
+    if callable(id_to_piece):
+        return id_to_piece
+    id_to_piece = getattr(sp_model, "IdToPiece", None)
+    if callable(id_to_piece):
+        return id_to_piece
+    return None
+
+
+def _convert_ids_to_raw_tokens(
+    tokenizer: TokenizerLike,
+    token_ids: list[int],
+) -> Sequence[object]:
+    id_to_piece = _get_sentencepiece_id_to_piece(tokenizer)
+    if id_to_piece is not None:
+        return [id_to_piece(token_id) for token_id in token_ids]
+
+    raw_tokens = tokenizer.convert_ids_to_tokens(token_ids)
+    if isinstance(raw_tokens, str):
+        return [raw_tokens]
+    return raw_tokens
+
+
+def _restore_leading_spaces(raw_token: object, token_str: str) -> str:
+    if not isinstance(raw_token, str):
+        return token_str
+
+    num_leading_spaces = 0
+    for char in raw_token:
+        if char not in _LEADING_SPACE_MARKERS:
+            break
+        num_leading_spaces += 1
+
+    if num_leading_spaces == 0:
+        return token_str
+
+    decoded_leading_spaces = len(token_str) - len(token_str.lstrip(" "))
+    num_missing_spaces = num_leading_spaces - decoded_leading_spaces
+    if num_missing_spaces <= 0:
+        return token_str
+    return " " * num_missing_spaces + token_str
+
 
 def convert_prompt_ids_to_tokens(
     tokenizer: TokenizerLike,
@@ -94,12 +169,19 @@ def convert_ids_list_to_tokens(
       Python list of token string representations
 
     """
+    if not token_ids:
+        return []
+
+    raw_tokens = _convert_ids_to_raw_tokens(tokenizer, token_ids)
+
     token_str_lst = []
-    for token_id in token_ids:
+    for idx, token_id in enumerate(token_ids):
         # use default skip_special_tokens.
         token_str = tokenizer.decode([token_id])
         if token_str is None:
             token_str = ""
+        raw_token = raw_tokens[idx] if idx < len(raw_tokens) else None
+        token_str = _restore_leading_spaces(raw_token, token_str)
         token_str_lst.append(token_str)
     return token_str_lst
 
