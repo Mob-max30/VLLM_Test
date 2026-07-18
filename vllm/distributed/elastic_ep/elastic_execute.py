@@ -76,7 +76,15 @@ def batch_transfer_weights(
     all_params = []
 
     for name, param in state_dict.items():
-        if name.endswith("expert_map") or name.find("._shared_experts") != -1:
+        # expert_map (CUDA) and expert_mask (ROCm/AITER) are per-rank routing
+        # metadata rebuilt on each worker for the new EP topology; never carry
+        # them across the transfer or a receiver's map would be overwritten by
+        # the sender's.
+        if (
+            name.endswith("expert_map")
+            or name.endswith("expert_mask")
+            or name.find("._shared_experts") != -1
+        ):
             continue
         if param.data_ptr() not in expert_weights_set:
             all_params.append(param.data)
@@ -550,6 +558,22 @@ class ElasticEPScalingExecutor:
         # in setup_eplb_from_mapping() but don't start the thread there because
         # groups aren't ready yet.
         eplb_state.start_async_loop()
+
+        # New scale-up ranks build their FusedMoE model before joining the new
+        # EP group, so their per-rank expert_map/expert_mask are still built for
+        # the pre-scale topology (ep_size==1 => unsharded, every global expert
+        # marked local). batch_transfer_weights() intentionally does not carry
+        # this metadata, so rebuild it here for the new EP world. Idempotent on
+        # existing workers (recomputes the same map).
+        if rank_mapping is None:  # scale-up
+            model = self.worker.model_runner.get_model()
+            if hasattr(model, "update_physical_experts_metadata"):
+                ep_size = get_ep_group().world_size
+                num_physical_experts = eplb_model_state.physical_to_logical_map.shape[1]
+                model.update_physical_experts_metadata(
+                    num_physical_experts=num_physical_experts,
+                    num_local_physical_experts=num_physical_experts // ep_size,
+                )
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
