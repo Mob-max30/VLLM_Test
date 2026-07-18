@@ -417,6 +417,15 @@ def _conv_inputs(total_tokens: int):
     return x, weight, bias
 
 
+def _sd_conv_states(num_slots: int, state_len: int) -> torch.Tensor:
+    storage = torch.zeros(num_slots, state_len, CONV_DIM, dtype=torch.bfloat16)
+    return storage.transpose(1, 2)
+
+
+def _maybe_pack_conv_weight(weight: torch.Tensor, is_vnni: bool) -> torch.Tensor:
+    return ops.causal_conv1d_weight_pack(weight) if is_vnni else weight
+
+
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
 def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> None:
@@ -475,6 +484,132 @@ def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> No
 
 @pytest.mark.skipif(
     not torch.cpu._is_amx_tile_supported(),
+    reason="causal_conv1d_update_cpu requires AMX/AVX512",
+)
+@pytest.mark.parametrize("is_vnni", [False, True])
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_accepts_wide_state(is_vnni: bool) -> None:
+    state_len = CONV_KERNEL - 1
+    wide_state_len = state_len + 5
+    batch_size = 3
+    x, weight, bias = _conv_inputs(batch_size)
+    conv_state_indices = torch.tensor([2, 0, 1], dtype=torch.int32)
+
+    narrow_state = _sd_conv_states(batch_size, state_len)
+    narrow_state.copy_(
+        tensor_cache(narrow_state.numel(), torch.bfloat16).view_as(narrow_state)
+    )
+    wide_state = _sd_conv_states(batch_size, wide_state_len)
+    wide_state[:, :, :state_len].copy_(narrow_state)
+    wide_state[:, :, state_len:].fill_(7)
+    wide_tail = wide_state[:, :, state_len:].clone()
+
+    conv_weight = _maybe_pack_conv_weight(weight, is_vnni)
+    out_narrow = ops.causal_conv1d_update_cpu(
+        x=x,
+        conv_states=narrow_state,
+        weight=conv_weight,
+        bias=bias,
+        silu_activation=True,
+        conv_state_indices=conv_state_indices,
+        is_vnni=is_vnni,
+    )
+    out_wide = ops.causal_conv1d_update_cpu(
+        x=x,
+        conv_states=wide_state,
+        weight=conv_weight,
+        bias=bias,
+        silu_activation=True,
+        conv_state_indices=conv_state_indices,
+        is_vnni=is_vnni,
+    )
+
+    torch.testing.assert_close(out_wide, out_narrow, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        wide_state[:, :, :state_len], narrow_state, atol=0, rtol=0
+    )
+    torch.testing.assert_close(wide_state[:, :, state_len:], wide_tail, atol=0, rtol=0)
+
+
+def _ref_causal_conv1d_update_cpu_multi(
+    x: torch.Tensor,
+    conv_states: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    conv_state_indices: torch.Tensor,
+    history_offsets: torch.Tensor,
+) -> torch.Tensor:
+    batch_size, seq_len, dim = x.shape
+    state_len = conv_states.size(2)
+    conv_out = torch.empty_like(x)
+    conv_weight = weight.unsqueeze(1)
+
+    for i in range(batch_size):
+        slot = int(conv_state_indices[i].item())
+        offset = int(history_offsets[i].item())
+        state = conv_states[slot]
+        x_seq = x[i].transpose(0, 1).to(state.dtype)
+        prior = state[:, offset : offset + CONV_KERNEL - 1]
+        conv_in = torch.cat([prior, x_seq], dim=-1).unsqueeze(0)
+        out = F.conv1d(conv_in, conv_weight, bias, groups=dim)[0]
+        conv_out[i] = F.silu(out).transpose(0, 1).to(conv_out.dtype)
+        keep = state[:, offset + 1 : offset + 1 + (state_len - seq_len)]
+        state.copy_(torch.cat([keep, x_seq], dim=-1))
+
+    return conv_out
+
+
+@pytest.mark.skipif(
+    not torch.cpu._is_amx_tile_supported(),
+    reason="causal_conv1d_update_cpu requires AMX/AVX512",
+)
+@pytest.mark.parametrize("batch_size", [1, 4])
+@pytest.mark.parametrize("seq_len", [1, 2, 4])
+@pytest.mark.parametrize("is_vnni", [False, True])
+@torch.inference_mode()
+def test_causal_conv1d_update_cpu_multi_token_matches_python(
+    batch_size: int,
+    seq_len: int,
+    is_vnni: bool,
+) -> None:
+    state_len = CONV_KERNEL - 1 + 3
+    x, weight, bias = _conv_inputs(batch_size * seq_len)
+    x = x.view(batch_size, seq_len, CONV_DIM).contiguous()
+    conv_state_indices = torch.arange(batch_size - 1, -1, -1, dtype=torch.int32)
+    history_offsets = torch.arange(batch_size, dtype=torch.int32) % seq_len
+
+    conv_states_ref = _sd_conv_states(batch_size, state_len)
+    conv_states_ref.copy_(
+        tensor_cache(conv_states_ref.numel(), torch.bfloat16).view_as(conv_states_ref)
+    )
+    conv_states = conv_states_ref.clone()
+
+    conv_weight = _maybe_pack_conv_weight(weight, is_vnni)
+    out = ops.causal_conv1d_update_cpu(
+        x=x,
+        conv_states=conv_states,
+        weight=conv_weight,
+        bias=bias,
+        silu_activation=True,
+        conv_state_indices=conv_state_indices,
+        is_vnni=is_vnni,
+        cache_seqlens=history_offsets,
+    )
+    ref_out = _ref_causal_conv1d_update_cpu_multi(
+        x=x,
+        conv_states=conv_states_ref,
+        weight=weight,
+        bias=bias,
+        conv_state_indices=conv_state_indices,
+        history_offsets=history_offsets,
+    )
+
+    torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(conv_states, conv_states_ref, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cpu._is_amx_tile_supported(),
     reason="causal_conv1d_fwd_cpu requires AMX/AVX512",
 )
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
@@ -513,6 +648,62 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
     out_split = torch.cat([out1, out2], dim=1)
 
     torch.testing.assert_close(out_split, out_full, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not torch.cpu._is_amx_tile_supported(),
+    reason="causal_conv1d_fwd_cpu requires AMX/AVX512",
+)
+@pytest.mark.parametrize("is_vnni", [False, True])
+@torch.inference_mode()
+def test_causal_conv1d_fwd_cpu_accepts_wide_state(is_vnni: bool) -> None:
+    state_len = CONV_KERNEL - 1
+    wide_state_len = state_len + 5
+    seq_lens = [CHUNK_SIZE - 1, CHUNK_SIZE + 5]
+    total_tokens = sum(seq_lens)
+    x, weight, bias = _conv_inputs(total_tokens)
+    query_start_loc = torch.tensor([0, seq_lens[0], total_tokens], dtype=torch.int32)
+    cache_indices = torch.tensor([2, 0], dtype=torch.int32)
+    has_initial_state = torch.tensor([True, False])
+
+    narrow_state = _sd_conv_states(3, state_len)
+    narrow_state.copy_(
+        tensor_cache(narrow_state.numel(), torch.bfloat16).view_as(narrow_state)
+    )
+    wide_state = _sd_conv_states(3, wide_state_len)
+    wide_state[:, :, :state_len].copy_(narrow_state)
+    wide_state[:, :, state_len:].fill_(7)
+    wide_tail = wide_state[:, :, state_len:].clone()
+
+    conv_weight = _maybe_pack_conv_weight(weight, is_vnni)
+    out_narrow = ops.causal_conv1d_fwd_cpu(
+        x=x.transpose(0, 1),
+        weight=conv_weight,
+        bias=bias,
+        conv_states=narrow_state,
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=is_vnni,
+    )
+    out_wide = ops.causal_conv1d_fwd_cpu(
+        x=x.transpose(0, 1),
+        weight=conv_weight,
+        bias=bias,
+        conv_states=wide_state,
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_state,
+        silu_activation=True,
+        is_vnni=is_vnni,
+    )
+
+    torch.testing.assert_close(out_wide, out_narrow, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(
+        wide_state[:, :, :state_len], narrow_state, atol=0, rtol=0
+    )
+    torch.testing.assert_close(wide_state[:, :, state_len:], wide_tail, atol=0, rtol=0)
 
 
 @torch.inference_mode()
