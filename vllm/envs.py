@@ -90,7 +90,9 @@ if TYPE_CHECKING:
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
+    VLLM_TRITON_MOE_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
+    VLLM_XPU_MOE_USE_BATCHED_TRITON: bool = False
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -621,6 +623,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # not trip the unknown-env-var check; warns on use and is otherwise
     # ignored.
     "VLLM_TRITON_ATTN_USE_TD": lambda: _deprecated_triton_attn_use_td(),
+    # TD operand loads in the batched MoE GEMM (moe_mmk).
+    # Unset = auto-on XPU; 1 = force on; 0 = force off.
+    "VLLM_TRITON_MOE_USE_TD": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_MOE_USE_TD", "").strip()
+    ),
+    # Opt-in: route unquantized XPU MoE through BatchedTritonExperts (the
+    # moe_mmk TD kernel) using the no-comms reference batched prepare/finalize.
+    # Default off keeps XPUExperts as the XPU backend.
+    "VLLM_XPU_MOE_USE_BATCHED_TRITON": lambda: bool(
+        int(os.getenv("VLLM_XPU_MOE_USE_BATCHED_TRITON", "0"))
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
