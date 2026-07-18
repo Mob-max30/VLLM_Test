@@ -12,6 +12,7 @@ from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_helion
 from vllm.utils.system_utils import set_env_var
 
 from .ir.clone_elimination import UnsafeCloneEliminationPass
@@ -132,6 +133,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         # always run fix_functionalization last
         self.fix_functionalization(graph)
+
+        # This target-only rewrite is safe after defunctionalization: it does
+        # not add/remove nodes or run DCE. Running here preserves vLLM's
+        # copy-elimination rules before switching compatible fused ops.
+        if self.helion_routing is not None:
+            self.helion_routing(graph)
         VllmInductorPass.dump_prefix = None  # Cleanup index
 
         VllmPatternMatcherPass.log_match_summary()
@@ -204,6 +211,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             self.clone_elimination = UnsafeCloneEliminationPass(config)
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
+            self.helion_routing = None
+            if envs.VLLM_USE_HELION_KERNELS and has_helion():
+                from .fusion.helion_routing import HelionFusionRoutingPass
+
+                self.helion_routing = HelionFusionRoutingPass(config)
 
     def add(self, pass_: InductorPass) -> None:
         assert isinstance(pass_, InductorPass)
@@ -226,6 +238,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         passes.append(self.clone_elimination.uuid())
         passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
+        if self.helion_routing is not None:
+            passes.append(self.helion_routing.uuid())
 
         # Include the compile range in the uuid to ensure that inductor
         # recompiles the graph for the new dynamic compile range.

@@ -430,6 +430,13 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
+        # Ensure the routed Helion ops are defined before the first compiled
+        # forward (profile_run). On a torch.compile cache hit the routing pass
+        # never runs, so registering here keeps cached graphs resolvable.
+        from vllm.kernels.helion.routing import register_routed_helion_ops
+
+        register_routed_helion_ops()
+
         if self.vllm_config.weight_transfer_config is not None:
             self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
                 self.vllm_config.weight_transfer_config,
