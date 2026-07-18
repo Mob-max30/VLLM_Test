@@ -188,6 +188,12 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable MLA dual RMS norm fusion when AITer has fused_qk_rmsnorm."""
+    # MLA-only fusion. Probing AITER imports aiter, which initializes the HIP
+    # context in the parent and forces multiprocessing to `spawn`. Skip it for
+    # non-MLA models so the parent stays clean and can still `fork`.
+    if cfg.model_config is None or not cfg.model_config.use_mla:
+        return False
+
     from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops
 
     return rocm_aiter_ops.is_enabled() and check_aiter_fused_qk_rmsnorm()
