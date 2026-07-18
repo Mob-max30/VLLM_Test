@@ -30,6 +30,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadingWorker,
 )
+from vllm.v1.kv_offload.sharding import derive_canonical_mappings
 
 logger = init_logger(__name__)
 
@@ -61,6 +62,9 @@ class OffloadingConnectorWorker:
     ):
         kv_cache_config = self.kv_cache_config
         num_blocks = kv_cache_config.num_blocks
+        mappings = derive_canonical_mappings(
+            self.spec.vllm_config, kv_cache_config, kv_caches
+        )
 
         # Packed layouts (e.g. DSv4) set block_stride > 0; their tensors use
         # stride(0) as the manager-block stride (equals total_num_bytes_per_block).
@@ -210,10 +214,21 @@ class OffloadingConnectorWorker:
 
                 curr_tensor_idx = len(block_tensors) - 1
                 for layer_name in tensor_layer_names:
+                    mapping = (
+                        mappings.get(layer_name)
+                        if len(tensors_per_block[first_layer_name]) == 1
+                        else None
+                    )
+                    assert (
+                        mapping is None
+                        or mapping.local_page_size_bytes
+                        == unpadded_page_size_bytes[layer_name]
+                    )
                     block_data_refs[layer_name].append(
                         CanonicalKVCacheRef(
                             tensor_idx=curr_tensor_idx,
                             page_size_bytes=(unpadded_page_size_bytes[layer_name]),
+                            mapping=mapping,
                         )
                     )
 
