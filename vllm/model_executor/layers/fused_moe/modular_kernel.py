@@ -1000,6 +1000,50 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     def is_monolithic() -> bool:
         return True
 
+    routing_replay_capture_fn: Callable[[torch.Tensor], None] | None = None
+    _routing_replay_buffer: torch.Tensor | None = None
+
+    def supports_routing_replay_capture(self) -> bool:
+        """Whether this expert supports routing replay capture.
+
+        Subclasses backed by a kernel that exposes routed expert IDs
+        (e.g. FlashInfer's ``routing_replay_out``) should override.
+        """
+        return False
+
+    def set_routing_replay_capture_fn(
+        self,
+        capture_fn: Callable[[torch.Tensor], None] | None,
+    ) -> None:
+        self.routing_replay_capture_fn = capture_fn
+
+    def _maybe_make_routing_replay_buffer(
+        self,
+        num_tokens: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if self.routing_replay_capture_fn is None:
+            return None
+        topk = self.moe_config.experts_per_token
+        buf = self._routing_replay_buffer
+        if buf is None or buf.shape[0] < num_tokens or buf.device != device:
+            buf = torch.empty(
+                (num_tokens, topk),
+                dtype=torch.int16,
+                device=device,
+            )
+            self._routing_replay_buffer = buf
+        return buf
+
+    def _maybe_dispatch_routing_replay(
+        self,
+        routing_replay_out: torch.Tensor | None,
+        num_tokens: int,
+    ) -> None:
+        if routing_replay_out is None or self.routing_replay_capture_fn is None:
+            return
+        self.routing_replay_capture_fn(routing_replay_out[:num_tokens])
+
     def apply(
         self,
         hidden_states: torch.Tensor,
