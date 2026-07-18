@@ -15,7 +15,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 60
+      timeout_in_minutes: 52
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -54,7 +54,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 65
+      timeout_in_minutes: 73
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -92,10 +92,8 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 55
-      # TODO(akaratza): Test after Torch >= 2.12 bump
-      soft_fail: true
+      device: mi300_1
+      timeout_in_minutes: 34
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -120,7 +118,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 55
+      timeout_in_minutes: 54
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -157,6 +155,13 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
+  mirror:
+    amd:
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 36
+      depends_on:
+      - image-build-amd
 
 - label: Spec Decode MTP hybrid (B200)
   timeout_in_minutes: 20
