@@ -234,6 +234,11 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = 0
+        self.num_reprefillable_tokens = 0
+        # Whether the drafter widens continued prefill chunks (re-prefilling
+        # trailing tokens), which requires reserving token budget so the widened
+        # draft token count stays within max_num_batched_tokens.
+        self.reserve_draft_widening = False
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -242,6 +247,11 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
+            if speculative_config.use_multi_module_mtp():
+                # During multi-module MTP, the last num_spec_tokens - 1 tokens can
+                # be re-prefilled by MTP modules in subsequent decode steps.
+                self.num_reprefillable_tokens = self.num_spec_tokens - 1
+                self.reserve_draft_widening = True
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
@@ -268,6 +278,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
+            num_reprefillable_tokens=self.num_reprefillable_tokens,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
@@ -502,7 +513,22 @@ class Scheduler(SchedulerInterface):
             )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(num_new_tokens, token_budget)
+
+            # Reserve token budget for the multi-module MTP draft's re-prefill
+            # widening. A continued prefill chunk (is_prefill_chunk was set at the
+            # previous step's finalization) is re-prefilled by the drafter this
+            # step, which grows its query by min(num_spec_tokens, num_computed+1)
+            # tokens. Debiting that here keeps the widened draft token count within
+            # max_num_batched_tokens, so the draft's fixed-size buffers never
+            # overflow. INVARIANT: the requests reserved for here must exactly
+            # match the ones the worker widens (its is_continued_prefill =
+            # is_prefilling & ~is_new); keep the two classifications in lockstep.
+            draft_expansion = 0
+            if self.reserve_draft_widening and request.is_prefill_chunk:
+                draft_expansion = min(
+                    self.num_spec_tokens, request.num_computed_tokens + 1
+                )
+            num_new_tokens = min(num_new_tokens, max(0, token_budget - draft_expansion))
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -612,7 +638,9 @@ class Scheduler(SchedulerInterface):
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
-            token_budget -= num_new_tokens
+            # Debit the scheduled tokens plus the reserved draft re-prefill
+            # widening (draft_expansion is 0 for decodes and first prefill chunks).
+            token_budget -= num_new_tokens + draft_expansion
             req_index += 1
 
             # Speculative decode related.

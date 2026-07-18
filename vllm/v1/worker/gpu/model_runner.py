@@ -602,7 +602,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     torch.zeros(
                         input_batch.num_tokens,
                         dtype=torch.bool,
-                        device=self.device,
+                        device="cpu",
                     ),
                 )
 
@@ -1362,6 +1362,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_intermediate_tensors = model_output
 
         finished_req_ids = scheduler_output.finished_req_ids
+        new_req_ids = {r.req_id for r in scheduler_output.scheduled_new_reqs}
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
             attn_metadata=attn_metadata,
@@ -1369,6 +1370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
+            new_req_ids=new_req_ids,
         )
 
         if not self.is_last_pp_rank:
@@ -1391,6 +1393,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
+        new_req_ids = self.execute_model_state.new_req_ids
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1499,6 +1502,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
                 mm_inputs=mm_inputs,
+                new_req_ids=new_req_ids,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
 
@@ -1629,6 +1633,7 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
+    new_req_ids: set[str]
 
 
 def sort_batch_req_ids(
