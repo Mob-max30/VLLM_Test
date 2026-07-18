@@ -141,7 +141,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=None,
+            # Respect quantization_config.exclude: FP16 router stays unquantized.
+            quant_config=quant_config,
             prefix=f"{prefix}.gate",
         )
 
@@ -149,7 +150,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             config.hidden_size,
             1,
             bias=False,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.shared_expert_gate",
         )
 
