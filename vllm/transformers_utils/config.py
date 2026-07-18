@@ -731,13 +731,23 @@ def get_config(
             raise ValueError(error_message) from e
 
     config_parser = get_config_parser(config_format)
-    config_dict, config = config_parser.parse(
-        model,
-        trust_remote_code=trust_remote_code,
-        revision=revision,
-        code_revision=code_revision,
-        hf_overrides=hf_overrides_kw or hf_overrides_fn,
-        **kwargs,
+    # With multiple processes loading the same model (e.g. --api-server-count
+    # > 1), one may read config.json while another refreshes the shared HF
+    # cache. huggingface_hub recreates the pointer non-atomically (os.remove +
+    # os.symlink in _create_symlink), so a concurrent reader can briefly see a
+    # missing/empty file and fail with a misleading "Unrecognized model" error.
+    # Retry the whole parse (it may read config.json more than once) so the read
+    # is redone once the cache write has settled.
+    config_dict, config = with_retry(
+        lambda: config_parser.parse(
+            model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision,
+            hf_overrides=hf_overrides_kw or hf_overrides_fn,
+            **kwargs,
+        ),
+        f"Error parsing config for {model}",
     )
 
     # Architecture mapping for models without explicit architectures field
