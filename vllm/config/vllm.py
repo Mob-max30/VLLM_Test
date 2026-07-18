@@ -548,6 +548,9 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if self.cache_config.simulate_forward:
+            return True
+
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -2047,6 +2050,17 @@ class VllmConfig:
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
+        if self.cache_config.simulate_forward:
+            self.load_config.load_format = "dummy"
+            self.load_config.device = "meta"
+
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.draft_load_config is not None
+            ):
+                self.speculative_config.draft_load_config.load_format = "dummy"
+                self.speculative_config.draft_load_config.device = "meta"
+
         if self.model_config.convert_type == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
             from vllm.model_executor.models.adapters import SequenceClassificationConfig
@@ -2214,7 +2228,7 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
-        if not HAS_TRITON:
+        if not HAS_TRITON and not self.cache_config.simulate_forward:
             raise ValueError("Model Runner V2 requires Triton.")
 
         unsupported = self._get_v2_model_runner_unsupported_features()
